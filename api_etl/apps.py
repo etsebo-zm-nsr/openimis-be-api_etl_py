@@ -17,7 +17,6 @@ DEFAULT_CONFIG = {
     "adapter_last_name_field": "lastName",
     "adapter_dob_field": "dateOfBirth",
 
-    "skip_integration_test": True,
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
 }
@@ -41,7 +40,6 @@ class ApiEtlConfig(AppConfig):
     adapter_last_name_field = None
     adapter_dob_field = None
 
-    skip_integration_test = None
     gql_query_api_etl_rule_perms = None
     gql_mutation_execute_api_etl_rule_perms = None
 

@@ -22,25 +22,12 @@ class ETLService(metaclass=abc.ABCMeta):
         self.sink = sink
 
     def execute(self):
-        """
-        Execute the ETL pipeline created by chaining the source, adapter and sink
-        """
         try:
-            raw_data = self.source.pull()
-        except self.source.Error as e:
-            logger.error("Error while pulling data from source: %s", str(e), exc_info=e)
-            return self._error_result(str(e))
-
-        try:
-            transformed_data = self.adapter.transform(raw_data)
-        except self.adapter.Error as e:
-            logger.error("Error while transforming data: %s", str(e), exc_info=e)
-            return self._error_result(str(e))
-
-        try:
-            self.sink.push(transformed_data)
-        except self.sink.Error as e:
-            logger.error("Error while pushing data to sink: %s", str(e), exc_info=e)
+            for raw_batch in self.source.pull():
+                transformed_batch = self.adapter.transform(raw_batch)
+                self.sink.push(transformed_batch)
+        except Exception as e:
+            logger.error("Error in ETL pipeline: %s", str(e), exc_info=e)
             return self._error_result(str(e))
 
         return self._success_result()

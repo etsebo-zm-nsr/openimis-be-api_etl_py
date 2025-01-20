@@ -37,8 +37,10 @@ class ExampleIndividualSource(DataSource):
         session = requests.Session()
         while in_progress:
             logger.debug("Fetching index: %s, batch size: %s", current_index, ApiEtlConfig.source_batch_size)
-            res = session.request(method, url, headers=headers,
-                                  params={"current": current_index, "rowCount": ApiEtlConfig.source_batch_size})
+            res = session.request(
+                method, url, headers=headers,
+                params={"current": current_index, "rowCount": ApiEtlConfig.source_batch_size}
+            )
 
             if not res.ok:
                 logger.error("HTTP Request failed: %s %s", res.status_code, res.reason)
@@ -50,10 +52,12 @@ class ExampleIndividualSource(DataSource):
                 logger.error("HTTP Error response: %s %s", body.get("message"), body.get("result"))
                 raise self.Error(f"HTTP Error response: {body.get('message')} {body.get('result')}")
 
-            if body["rowCount"] < ApiEtlConfig.source_batch_size or len(body["rows"]) < ApiEtlConfig.source_batch_size:
+            rows = body.get("rows", [])
+            if rows:
+                yield rows
+
+            # Determine if we've reached the last page
+            if len(rows) < ApiEtlConfig.source_batch_size:
                 in_progress = False
-
-            pages.append(body)
-            current_index += ApiEtlConfig.source_batch_size
-
-        return pages
+            else:
+                current_index += ApiEtlConfig.source_batch_size

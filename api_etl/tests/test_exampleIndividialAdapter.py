@@ -15,15 +15,10 @@ class ExampleIndividualAdapterTestCase(TestCase):
 
     def test_transform_success(self):
         data = [{
-            'current': 0,
-            'rowCount': 1,
-            'rows': [{
-                "firstName": self._FN_1,
-                "lastName": self._LN_1,
-                "dateOfBirth": self._DOB_1,
-                **self._EXT_1,
-            }],
-            'total': 100
+            "firstName": self._FN_1,
+            "lastName": self._LN_1,
+            "dateOfBirth": self._DOB_1,
+            **self._EXT_1,
         }]
 
         expected = [{
@@ -37,23 +32,13 @@ class ExampleIndividualAdapterTestCase(TestCase):
         self.assertEquals(actual, expected)
 
     def test_no_rows(self):
-        data = [{
-            'current': 0,
-            'rowCount': 0,
-            'rows': [],
-            'total': 0
-        }]
-
+        data = []
         expected = []
 
         actual = self.adapter.transform(data)
         self.assertEquals(actual, expected)
 
     def test_no_rows_item(self):
-        data = [{
-            'current': 0,
-            'rowCount': 0,
-            'total': 0
-        }]
+        data = None
 
         self.assertRaises(self.adapter.Error, self.adapter.transform, data)

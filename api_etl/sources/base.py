@@ -1,5 +1,5 @@
 import abc
-from typing import Any
+from typing import Any, Generator
 
 
 class DataSource(metaclass=abc.ABCMeta):
@@ -12,5 +12,5 @@ class DataSource(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def pull(self) -> Any:
+    def pull(self) -> Generator[Any, None, None]:
         raise NotImplementedError("pull() not implemented")
