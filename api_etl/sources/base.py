@@ -1,5 +1,5 @@
 import abc
-from typing import Any, Generator
+from typing import Any, Generator, Tuple, Optional
 
 
 class DataSource(metaclass=abc.ABCMeta):
@@ -12,5 +12,9 @@ class DataSource(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def pull(self) -> Generator[Any, None, None]:
+    def pull(self) -> Generator[Tuple[Any, Optional[Any]], None, None]:
+        """
+        Returns:
+            A generator yielding tuples of (raw_batch, identifier - optional).
+        """
         raise NotImplementedError("pull() not implemented")

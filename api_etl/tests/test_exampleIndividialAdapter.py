@@ -9,6 +9,8 @@ class ExampleIndividualAdapterTestCase(TestCase):
     _LN_1 = "Test Last Name 1"
     _DOB_1 = "1970-01-01"
     _EXT_1 = {"test_field_1": "Test Value 1"}
+    _LOC_NAME = 'Virginia'
+    _LOC_CODE = 'VA'
 
     def setUp(self):
         self.adapter = ExampleIndividualAdapter()
@@ -18,6 +20,8 @@ class ExampleIndividualAdapterTestCase(TestCase):
             "firstName": self._FN_1,
             "lastName": self._LN_1,
             "dateOfBirth": self._DOB_1,
+            "locationName": self._LOC_NAME,
+            "locationCode": self._LOC_CODE,
             **self._EXT_1,
         }]
 
@@ -25,7 +29,8 @@ class ExampleIndividualAdapterTestCase(TestCase):
             "first_name": self._FN_1,
             "last_name": self._LN_1,
             "dob": self._DOB_1,
-            "json_ext": self._EXT_1
+            "location_name": self._LOC_NAME,
+            "location_code": self._LOC_CODE,
         }]
 
         actual = self.adapter.transform(data)

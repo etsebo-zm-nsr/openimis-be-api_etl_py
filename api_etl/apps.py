@@ -16,6 +16,8 @@ DEFAULT_CONFIG = {
     "adapter_first_name_field": "firstName",
     "adapter_last_name_field": "lastName",
     "adapter_dob_field": "dateOfBirth",
+    "adapter_location_name_field": "locationName",
+    "adapter_location_code_field": "locationCode",
 
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
@@ -39,6 +41,8 @@ class ApiEtlConfig(AppConfig):
     adapter_first_name_field = None
     adapter_last_name_field = None
     adapter_dob_field = None
+    adapter_location_name_field = None
+    adapter_location_code_field = None
 
     gql_query_api_etl_rule_perms = None
     gql_mutation_execute_api_etl_rule_perms = None

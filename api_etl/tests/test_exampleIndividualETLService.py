@@ -1,6 +1,7 @@
 import logging
 from unittest.mock import patch, MagicMock
 
+from django.db import connection
 from django.test import TestCase
 
 from api_etl.apps import ApiEtlConfig
@@ -9,6 +10,7 @@ from api_etl.services import ExampleIndividualETLService
 from api_etl.sources import ExampleIndividualSource
 from core.test_helpers import create_test_interactive_user
 from individual.models import Individual
+from unittest import skipIf
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,11 @@ class ETLServiceTestCase(TestCase):
 
     @patch("requests.Session.request")
     @patch("api_etl.apps.ApiEtlConfig.source_batch_size", new=2)
+    @patch('individual.services.IndividualConfig.enable_maker_checker_for_individual_upload', False)
+    @skipIf(
+        connection.vendor != "postgresql",
+        "Skipping tests due to individual workflow only supports postgres."
+    )
     def test_example_individual_etl_service(self, mock_request):
         mock_request.side_effect = [
             MagicMock(

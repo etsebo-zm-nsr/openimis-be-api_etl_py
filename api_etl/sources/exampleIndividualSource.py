@@ -6,6 +6,8 @@ from api_etl.apps import ApiEtlConfig
 from api_etl.auth_provider import get_auth_provider
 from api_etl.auth_provider.base import AuthProvider
 from api_etl.sources import DataSource
+from api_etl.utils import get_timestamped_batch_identifier
+
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,7 @@ class ExampleIndividualSource(DataSource):
     def pull(self):
         """
         Pull the information from the Example Individual API
-        This Source returns the data in form of list of pages forming the paginated response
+        This Source yields the list of records in batch
         """
         headers = {
             **ApiEtlConfig.source_headers,
@@ -31,7 +33,6 @@ class ExampleIndividualSource(DataSource):
 
         logger.info("Pulling individuals from %s %s", method, url)
 
-        pages = []
         in_progress = True
         current_index = 0
         session = requests.Session()
@@ -54,7 +55,8 @@ class ExampleIndividualSource(DataSource):
 
             rows = body.get("rows", [])
             if rows:
-                yield rows
+                identifier = get_timestamped_batch_identifier(prefix=f"batch_{current_index}_")
+                yield rows, identifier
 
             # Determine if we've reached the last page
             if len(rows) < ApiEtlConfig.source_batch_size:

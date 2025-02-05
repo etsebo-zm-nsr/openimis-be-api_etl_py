@@ -23,9 +23,9 @@ class ETLService(metaclass=abc.ABCMeta):
 
     def execute(self):
         try:
-            for raw_batch in self.source.pull():
+            for raw_batch, batch_identifier in self.source.pull():
                 transformed_batch = self.adapter.transform(raw_batch)
-                self.sink.push(transformed_batch)
+                self.sink.push(transformed_batch, batch_identifier)
         except Exception as e:
             logger.error("Error in ETL pipeline: %s", str(e), exc_info=e)
             return self._error_result(str(e))

@@ -1,6 +1,6 @@
 from api_etl.adapters import DataAdapter, ExampleIndividualAdapter
 from api_etl.services.base import ETLService
-from api_etl.sinks import DataSink, HistoryModelServiceSink
+from api_etl.sinks import DataSink, IndividualImportSink
 from api_etl.sources import DataSource, ExampleIndividualSource
 from core.models import User
 from individual.services import IndividualService
@@ -19,5 +19,5 @@ class ExampleIndividualETLService(ETLService):
         super().__init__(
             source=source or ExampleIndividualSource(),
             adapter=adapter or ExampleIndividualAdapter(),
-            sink=sink or HistoryModelServiceSink(IndividualService(user), rollback_on_fail=False)
+            sink=sink or IndividualImportSink(user)
         )

@@ -24,7 +24,8 @@ class ExampleIndividualAdapter(DataAdapter):
             result_row = {"first_name": row.pop(ApiEtlConfig.adapter_first_name_field) or "empty",
                           "last_name": row.pop(ApiEtlConfig.adapter_last_name_field) or "empty",
                           "dob": row.pop(ApiEtlConfig.adapter_dob_field) or "1970-01-01",
-                          "json_ext": row}
+                          "location_name": row.get(ApiEtlConfig.adapter_location_name_field),
+                          "location_code": row.get(ApiEtlConfig.adapter_location_code_field),}
             result.append(result_row)
 
         return result
