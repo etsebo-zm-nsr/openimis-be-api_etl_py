@@ -9,6 +9,7 @@ class ExampleIndividualAdapterTestCase(TestCase):
     _LN_1 = "Test Last Name 1"
     _DOB_1 = "1970-01-01"
     _EXT_1 = {"test_field_1": "Test Value 1"}
+    _ID = '42'
     _LOC_NAME = 'Virginia'
     _LOC_CODE = 'VA'
 
@@ -17,6 +18,7 @@ class ExampleIndividualAdapterTestCase(TestCase):
 
     def test_transform_success(self):
         data = [{
+            "id": self._ID,
             "firstName": self._FN_1,
             "lastName": self._LN_1,
             "dateOfBirth": self._DOB_1,
@@ -31,6 +33,7 @@ class ExampleIndividualAdapterTestCase(TestCase):
             "dob": self._DOB_1,
             "location_name": self._LOC_NAME,
             "location_code": self._LOC_CODE,
+            "external_id": self._ID,
         }]
 
         actual = self.adapter.transform(data)

@@ -1,4 +1,4 @@
-import logging
+import json
 from unittest.mock import patch, MagicMock
 
 from django.db import connection
@@ -8,11 +8,9 @@ from api_etl.apps import ApiEtlConfig
 from api_etl.auth_provider import get_auth_provider
 from api_etl.services import ExampleIndividualETLService
 from api_etl.sources import ExampleIndividualSource
-from core.test_helpers import create_test_interactive_user
+from core.test_helpers import LogInHelper
 from individual.models import Individual
 from unittest import skipIf
-
-logger = logging.getLogger(__name__)
 
 
 MOCKED_RESPONSE_DATA = [
@@ -20,7 +18,7 @@ MOCKED_RESPONSE_DATA = [
         "status": True,
         "rowCount": 2,
         "rows": [
-            {"firstName": "John", "lastName": "Doe", "dateOfBirth": "1990-01-01", "id": 1, "extraField": "value1"},
+            {"firstName": "John", "lastName": "Doe Updated", "dateOfBirth": "1990-01-01", "id": 1, "extraField": "value1"},
             {"firstName": "Jane", "lastName": "Smith", "dateOfBirth": "1985-05-15", "id": 2, "extraField": "value2"}
         ],
     },
@@ -34,10 +32,29 @@ MOCKED_RESPONSE_DATA = [
 ]
 
 class ETLServiceTestCase(TestCase):
+    def setUp(self):
+        self.user = LogInHelper().get_or_create_user_api()
+        ApiEtlConfig.sink_model_lookup_field = 'json_ext__external_id'
+        ApiEtlConfig.sink_update_existing = True
+
+        # Create existing individual in the database
+        self.individual = Individual(
+            first_name='John',
+            last_name='Doe',
+            dob='1990-01-01',
+            json_ext={'external_id': 1},
+        )
+        self.individual.save(username=self.user.username)
 
     @patch("requests.Session.request")
     @patch("api_etl.apps.ApiEtlConfig.source_batch_size", new=2)
     @patch('individual.services.IndividualConfig.enable_maker_checker_for_individual_upload', False)
+    @patch('individual.services.IndividualConfig.enable_maker_checker_for_individual_update', False)
+    @patch('individual.services.IndividualConfig.individual_schema', json.dumps({
+        "properties": {
+            "external_id": {"type": "int"}
+        }
+    }))
     @skipIf(
         connection.vendor != "postgresql",
         "Skipping tests due to individual workflow only supports postgres."
@@ -53,16 +70,14 @@ class ETLServiceTestCase(TestCase):
 
         initial_count = Individual.objects.count()
 
-        user = create_test_interactive_user(username="test_admin")
         source = ExampleIndividualSource(get_auth_provider('noauth'))
-        service = ExampleIndividualETLService(user, source=source)
+        service = ExampleIndividualETLService(self.user, source=source)
         service.execute()
 
         final_count = Individual.objects.count()
 
-        self.assertEqual(final_count - initial_count, 3)
-        logging.info(f"Successfully imported {final_count - initial_count} individuals")
+        self.assertEqual(final_count - initial_count, 2)
 
-        self.assertTrue(Individual.objects.filter(first_name="John", last_name="Doe").exists())
+        self.assertTrue(Individual.objects.filter(first_name="John", last_name="Doe Updated").exists())
         self.assertTrue(Individual.objects.filter(first_name="Jane", last_name="Smith").exists())
         self.assertTrue(Individual.objects.filter(first_name="Alice", last_name="Johnson").exists())
