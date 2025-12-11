@@ -17,7 +17,7 @@ class ExampleIndividualAdapter(DataAdapter):
         result = []
 
         if data is None:
-            raise self.Error(f"Invalid input, expect input not to be None")
+            raise self.Error("Invalid input, expect input not to be None")
 
         for row in data:
             result_row = {"first_name": row.pop(ApiEtlConfig.adapter_first_name_field) or "empty",
@@ -25,7 +25,7 @@ class ExampleIndividualAdapter(DataAdapter):
                           "dob": row.pop(ApiEtlConfig.adapter_dob_field) or "1970-01-01",
                           "external_id": row.get("id"),
                           "location_name": row.get(ApiEtlConfig.adapter_location_name_field),
-                          "location_code": row.get(ApiEtlConfig.adapter_location_code_field),}
+                          "location_code": row.get(ApiEtlConfig.adapter_location_code_field)}
             result.append(result_row)
 
         return result

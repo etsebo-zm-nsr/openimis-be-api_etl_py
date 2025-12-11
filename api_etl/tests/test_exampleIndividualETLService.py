@@ -31,7 +31,9 @@ MOCKED_RESPONSE_DATA = [
     },
 ]
 
+
 class ETLServiceTestCase(TestCase):
+
     def setUp(self):
         self.user = LogInHelper().get_or_create_user_api()
         ApiEtlConfig.sink_model_lookup_field = 'json_ext__external_id'
@@ -44,7 +46,7 @@ class ETLServiceTestCase(TestCase):
             dob='1990-01-01',
             json_ext={'external_id': 1},
         )
-        self.individual.save(username=self.user.username)
+        self.individual.save(user=self.user)
 
     @patch("requests.Session.request")
     @patch("api_etl.apps.ApiEtlConfig.source_batch_size", new=2)

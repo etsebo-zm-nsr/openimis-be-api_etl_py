@@ -1,3 +1,4 @@
+# flake8: noqa
 from typing import Literal, Optional
 
 from api_etl.apps import ApiEtlConfig
