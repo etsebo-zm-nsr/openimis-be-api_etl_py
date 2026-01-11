@@ -1,7 +1,6 @@
 import logging
 from api_etl.sinks import DataSink
 from api_etl.utils import data_to_file
-from core.services import BaseService
 from core.models import User
 from individual.models import Individual
 from individual.services import IndividualImportService
@@ -14,6 +13,7 @@ IMPORT_NEW_INDIVIDUALS = "Python Import Individuals"
 UPDATE_EXISTING_INDIVIDUALS = "Python Update Individuals"
 WORKFLOW_GROUP = "individual"
 GROUP_AGGREGATION_COLUMN = None
+
 
 class IndividualImportSink(DataSink):
 
@@ -29,7 +29,7 @@ class IndividualImportSink(DataSink):
         if new_records:
             self._import_new_records(new_records, batch_identifier)
         else:
-            logger.debug(f"No new record to import")
+            logger.debug("No new record to import")
 
         if existing_records:
             if ApiEtlConfig.sink_update_existing:
@@ -37,7 +37,7 @@ class IndividualImportSink(DataSink):
             else:
                 logger.debug(f"Skipped updating {len(existing_records)} existing records due to ApiEtlConfig.sink_update_existing = False")
         else:
-            logger.debug(f"No existing record to update")
+            logger.debug("No existing record to update")
 
     def _import_new_records(self, new_records, batch_identifier):
         import_file = data_to_file(new_records, f'import_{batch_identifier}')

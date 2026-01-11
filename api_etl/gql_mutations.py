@@ -13,7 +13,6 @@ from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
 
 
-
 class ETLServiceMutation(BaseMutation):
     """
     Mutation to execute the ETLService

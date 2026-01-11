@@ -2,7 +2,6 @@ import csv
 import importlib
 import inspect
 import io
-import sys
 from datetime import datetime
 from django.core.files.uploadedfile import InMemoryUploadedFile
 from typing import Any, Optional
@@ -72,4 +71,3 @@ def data_to_file(data: list[dict], identifier: Optional[Any] = None) -> InMemory
         size=buffer.tell(),
         charset="utf-8"
     )
-
