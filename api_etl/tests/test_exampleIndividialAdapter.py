@@ -37,14 +37,14 @@ class ExampleIndividualAdapterTestCase(TestCase):
         }]
 
         actual = self.adapter.transform(data)
-        self.assertEquals(actual, expected)
+        self.assertEqual(actual, expected)
 
     def test_no_rows(self):
         data = []
         expected = []
 
         actual = self.adapter.transform(data)
-        self.assertEquals(actual, expected)
+        self.assertEqual(actual, expected)
 
     def test_no_rows_item(self):
         data = None
