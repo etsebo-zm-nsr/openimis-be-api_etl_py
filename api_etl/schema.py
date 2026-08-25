@@ -1,16 +1,12 @@
 import graphene
 
 from api_etl.apps import ApiEtlConfig
+from api_etl.dispatch import available_service_names, resolve_service
 from api_etl.gql_queries import (
     ETLServicesGQLType,
     ETLServicesListGQLType,
 )
 from api_etl.gql_mutations import ETLServiceMutation
-from api_etl.utils import (
-    get_class_by_name,
-    get_classes_in_module,
-    ETL_CLASS
-)
 
 
 class Query(graphene.ObjectType):
@@ -24,27 +20,18 @@ class Query(graphene.ObjectType):
         if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
             raise PermissionError("Unauthorized")
 
-        list_sr = []
         service_name = kwargs.get("name_of_service", None)
         if service_name:
-            # check if provided service etl class exists in application
-            class_service = get_class_by_name(ETL_CLASS, service_name)
-            if class_service:
-                list_sr.append(
-                    ETLServicesGQLType(
-                        name_of_service=class_service.__name__,
-                    )
-                )
+            # Registered connectors resolve by their registry name; services defined
+            # inside api_etl still resolve by class name.
+            service_cls, _ = resolve_service(service_name)
+            names = [service_name] if service_cls else []
         else:
-            # get all etl classes within module
-            class_service_list = get_classes_in_module(ETL_CLASS)
-            for class_service in class_service_list:
-                list_sr.append(
-                    ETLServicesGQLType(
-                        name_of_service=class_service,
-                    )
-                )
-        return ETLServicesListGQLType(list_sr)
+            names = available_service_names()
+
+        return ETLServicesListGQLType(
+            [ETLServicesGQLType(name_of_service=name) for name in names]
+        )
 
 
 class Mutation(graphene.ObjectType):

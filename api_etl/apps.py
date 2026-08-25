@@ -24,6 +24,14 @@ DEFAULT_CONFIG = {
 
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
+
+    # User that scheduled runs are attributed to. import_individuals needs a real User
+    # for audit columns, and the scheduler has no request user.
+    "system_user_login": "Admin",
+    # Hand runs to a Celery worker instead of executing inside the HTTP request.
+    # Required in the distribution: MODE=Prod != "PROD", so core.async_mutations is
+    # False and a long sync would otherwise block a request thread until it timed out.
+    "run_async": True,
 }
 
 
@@ -52,6 +60,9 @@ class ApiEtlConfig(AppConfig):
 
     gql_query_api_etl_rule_perms = None
     gql_mutation_execute_api_etl_rule_perms = None
+
+    system_user_login = None
+    run_async = None
 
     @classmethod
     def _load_config(cls, cfg):
