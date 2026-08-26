@@ -22,10 +22,9 @@ def get_auth_provider(auth_type: Optional[Literal["noauth", "basic", "bearer", "
 
     Two call styles:
       * `get_auth_provider(auth_cfg=cfg.auth)` - registry-based connectors; the type and
-        credentials both come from the per-source config slice.
-      * `get_auth_provider()` / `get_auth_provider("basic")` - upstream behaviour,
-        reading the process-global ApiEtlConfig. Retained so the shipped
-        ExampleIndividual* pipeline keeps working unchanged.
+        credentials both come from the per-source config slice. Used by every connector.
+      * `get_auth_provider()` / `get_auth_provider("basic")` - falls back to the
+        process-global ApiEtlConfig when no per-source config is given.
     """
     if auth_cfg is not None and auth_type is None:
         auth_type = auth_cfg.type

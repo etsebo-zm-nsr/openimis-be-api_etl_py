@@ -6,8 +6,7 @@ A connector should only have to express *how its API paginates* and *how its fie
 
 Two pagination strategies cover every source seen so far:
 
-  * `iter_offset_pages()`  - offset/limit query params (ZISPIS-style, and upstream's
-    own example source).
+  * `iter_offset_pages()`  - offset/limit query params (ZISPIS-style).
   * `iter_next_url_pages()` - follow an absolute "next" URL until exhausted
     (KoboToolbox-style).
 """

@@ -10,9 +10,8 @@ class BasicAuthProvider(AuthProvider):
     """
 
     def __init__(self, auth_cfg=None):
-        # auth_cfg is an api_etl.config.AuthConfig for registry-based connectors.
-        # None keeps the upstream behaviour of reading the global ApiEtlConfig, which
-        # the shipped ExampleIndividual* pipeline still relies on.
+        # auth_cfg is an api_etl.config.AuthConfig, resolved per-connector by the
+        # registry. None falls back to the process-global ApiEtlConfig.
         self.auth_cfg = auth_cfg
 
     def get_auth_header(self) -> dict[str, str]:

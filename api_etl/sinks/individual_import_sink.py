@@ -89,8 +89,8 @@ class IndividualImportSink(DataSink):
         )
 
     # ---------------------------------------------------------------- config
-    # Each falls back to the process-global ApiEtlConfig when no per-source config was
-    # given, so the shipped ExampleIndividual* pipeline is unaffected.
+    # Each falls back to the process-global ApiEtlConfig when no per-source config is
+    # given (every registered connector supplies one; this is a defensive default).
 
     @property
     def lookup_field(self):
