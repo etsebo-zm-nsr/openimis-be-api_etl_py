@@ -1,6 +1,7 @@
 from django.test import TestCase
 from unittest.mock import patch
 from api_etl.sinks.individual_import_sink import IndividualImportSink, IMPORT_NEW_INDIVIDUALS, UPDATE_EXISTING_INDIVIDUALS, WORKFLOW_GROUP
+from core.models import Language
 from core.test_helpers import LogInHelper
 from individual.models import Individual
 from django.core.files.uploadedfile import InMemoryUploadedFile
@@ -10,6 +11,11 @@ from api_etl.apps import ApiEtlConfig
 class TestIndividualImportSink(TestCase):
 
     def setUp(self):
+        # LogInHelper creates an InteractiveUser with LanguageID='en', a FK to
+        # tblLanguages. `manage.py test --nomigrations` builds the schema from models and
+        # therefore skips the data migrations that seed it, so teardown's constraint check
+        # fails. Idempotent, so this is a no-op when the row is already present.
+        Language.objects.get_or_create(code='en', defaults={'name': 'English', 'sort_order': 1})
         self.user = LogInHelper().get_or_create_user_api()
         ApiEtlConfig.sink_model_lookup_field = 'json_ext__external_id'
         ApiEtlConfig.sink_update_existing = True
