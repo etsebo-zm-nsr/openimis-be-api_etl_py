@@ -33,9 +33,15 @@ Subclass `BaseHttpSource` and `BaseMappingAdapter`, declare a `DEFAULT_CONFIG`, 
 `urls.py` is required even when empty — openIMIS mounts `<module>.urls` for every
 installed module, and without it the whole backend fails to start.
 
-Any column a connector emits must also be declared in `individual_schema` by one of its
-own migrations, or `validate_dataframe_headers` rejects the entire upload. The
-connector/schema contract test in `tests/` fails if the two drift apart.
+Any column a connector emits must also be declared in `individual_schema`, or
+`validate_dataframe_headers` rejects the entire upload. Both that schema and a
+connector's `field_map` are **runtime configuration**, set through the Django admin per
+deployment rather than in migrations - so after configuring either, check they agree:
+
+```bash
+manage.py etl_check_schema              # all connectors
+manage.py etl_check_schema --print-missing
+```
 
 A connector should be thin. `zm_etl_kobo`'s adapter contains no logic at all.
 
