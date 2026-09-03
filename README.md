@@ -28,9 +28,14 @@ would silently stop matching and create duplicate people.
 
 ## Writing a connector
 
-See `docs/ZAMBIA-ETL-CONNECTOR-GUIDE.md` in the distribution repo. In short: subclass
-`BaseHttpSource` and `BaseMappingAdapter`, declare a `DEFAULT_CONFIG`, and call
+Subclass `BaseHttpSource` and `BaseMappingAdapter`, declare a `DEFAULT_CONFIG`, and call
 `register_etl_source(...)` from `AppConfig.ready()` with a **lazy** `config_provider`.
+`urls.py` is required even when empty — openIMIS mounts `<module>.urls` for every
+installed module, and without it the whole backend fails to start.
+
+Any column a connector emits must also be declared in `individual_schema` by one of its
+own migrations, or `validate_dataframe_headers` rejects the entire upload. The
+connector/schema contract test in `tests/` fails if the two drift apart.
 
 A connector should be thin. `zm_etl_kobo`'s adapter contains no logic at all.
 
@@ -44,6 +49,28 @@ SOURCE_DEFAULTS  <-  connector DEFAULT_CONFIG  <-  stored ModuleConfiguration
 
 Credentials are referenced as `"env:VAR_NAME"` and read from the process environment —
 never stored, because that table appears in every database backup.
+
+## Running the tests
+
+```bash
+manage.py test api_etl --nomigrations
+```
+
+**`--nomigrations` is required.** Without it the test database cannot be created at all:
+`core.0001_initial` fails with `relation "tblUsers" does not exist`, being a legacy
+migration that assumes the pre-existing openIMIS schema. A development database works
+only because it is built from the openIMIS DB image, which ships those tables.
+
+Two consequences worth knowing: the schema is built from models, so data migrations
+never run and reference tables are empty (a test needing a user must seed `tblLanguages`
+first — see `tests/test_individual_import_sink.py`); and a leftover `test_imis` from an
+interrupted run blocks the next one with a prompt that fails as `EOFError` on a non-tty,
+so drop that database and re-run.
+
+Covered: configuration deep-merge, the registry, the mapping adapter (national-ID
+normalisation, household/role emission), both paginators, auth fail-closed behaviour,
+and the connector/schema contract. **Not** covered: the sink's record-linkage branches
+and household formation — currently the highest-value gap.
 
 ## Operating
 
