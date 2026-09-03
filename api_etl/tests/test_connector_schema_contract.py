@@ -3,16 +3,20 @@
 `validate_dataframe_headers` rejects the WHOLE upload if a single emitted column is
 undeclared (blocker G2), and it does so at import time, after a successful pull, with an
 error that names the column but not the connector. Adding a field to a connector's
-`field_map` and forgetting the matching schema migration is therefore a change that
+`field_map` without adding the column to `individual_schema` is therefore a change that
 looks fine, passes review, and breaks the sync.
+
+Both are runtime configuration set through the Django admin, so this checks THIS
+deployment's configuration - `manage.py etl_check_schema` is the same check as an
+operator-facing command.
 
 This runs generically over every registered connector, so a connector added later gets
 the check for free.
 
 It validates the schema of THIS deployment, which is loaded into `IndividualConfig` at
-startup. When the ETL migrations have not been applied the test skips rather than
-failing, so it reports "your database is behind" as a skip and "your connector and its
-migration disagree" as a failure - two very different problems.
+startup. When the shared ETL columns are absent the test skips rather than failing, so
+"this database is not set up" reports as a skip and "this deployment's connector config
+and schema disagree" as a failure - two very different problems.
 """
 import json
 
@@ -71,8 +75,8 @@ class ConnectorSchemaContractTestCase(TestCase):
             missing = sorted(CORE_EMITTED - self.declared)
             self.skipTest(
                 "individual_schema is missing the shared ETL columns "
-                f"({', '.join(missing)}), so the api_etl migrations have not been "
-                "applied to this database. Run `manage.py migrate` and re-run."
+                f"({', '.join(missing)}), so this database is not set up for ETL. "
+                "Apply the api_etl migrations and the connector configuration, then re-run."
             )
 
     def test_every_registered_connector_declares_its_columns(self):
@@ -90,8 +94,8 @@ class ConnectorSchemaContractTestCase(TestCase):
             if undeclared:
                 problems.append(
                     f"{registration.name}: emits undeclared column(s) {undeclared}. "
-                    f"Add them to individual_schema in a {registration.name} migration, "
-                    f"or drop them from its field_map."
+                    f"Add them to individual_schema (Core > Module configurations, "
+                    f"module=individual), or drop them from {registration.name}'s field_map."
                 )
 
         self.assertEqual(problems, [], "\n" + "\n".join(problems))
