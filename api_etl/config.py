@@ -147,6 +147,12 @@ class AdapterConfig:
     # 0 disables either bound.
     min_year: int = 1900
     max_year: int = 0                   # 0 => "not in the future"
+    # Columns an adapter subclass emits in code rather than through `field_map` -
+    # typically attached to some rows only, such as a note explaining a cleaning
+    # decision. `validate_dataframe_headers` rejects the WHOLE upload over one
+    # undeclared column, so declaring them here is what lets `etl_check_schema` see
+    # them; otherwise the pre-flight passes and the import fails.
+    extra_columns: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -225,6 +231,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "default_role": "OTHER_RELATIVE", "recipient_field": None,
         "national_id_field": None, "national_id_type_field": None, "date_formats": ["%Y-%m-%d"],
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
+        "extra_columns": [],
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,

@@ -25,6 +25,12 @@ from api_etl.registry import get_etl_source, list_etl_sources
 # Consumed by individual/ before schema validation, so never declared.
 MAGIC_COLUMNS = {"recipient_info", GROUP_AGGREGATION_COLUMN, "individual_role"}
 
+# Written by the sink, not by any connector's field_map, whenever national-id linkage
+# is on. They appear on a MINORITY of rows - only those that matched or were flagged -
+# so a batch can import cleanly for weeks and then fail the first time a real duplicate
+# arrives. Counting them here makes that failure impossible to reach.
+LINKAGE_COLUMNS = {"alt_external_ids", "linkage_candidate_id", "linkage_note"}
+
 
 def emitted_columns(config):
     """Columns this connector's configuration will put on a row."""
@@ -42,6 +48,9 @@ def emitted_columns(config):
             emitted.add("recipient_info")
     if config.provenance.data_source_label:
         emitted.add("beneficiary_data_source")
+    emitted |= set(adapter.extra_columns or ())
+    if config.sink.link_on_national_id:
+        emitted |= LINKAGE_COLUMNS
     return emitted
 
 
