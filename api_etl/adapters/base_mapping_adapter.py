@@ -167,7 +167,6 @@ class BaseMappingAdapter(DataAdapter):
                 self.skipped.append((record.get("external_id"), missing))
                 continue
             out.append(record)
-        out = self.order_batch(out)
         if self.skipped:
             by_field: dict = {}
             for _, fields in self.skipped:
@@ -181,32 +180,6 @@ class BaseMappingAdapter(DataAdapter):
                 ", ".join(f"{k}={v}" for k, v in sorted(by_field.items())),
             )
         return out
-
-    def order_batch(self, records: list) -> list:
-        """Put each household's head ahead of its other members.
-
-        Upstream creates GroupIndividual rows one at a time, and each save runs
-        `_assure_primary_recipient_in_group`. If a member who is NOT the head is created
-        first, that method finds no primary recipient and no head in the group yet and
-        promotes it to HEAD + PRIMARY. When the real head is created moments later,
-        `_change_head` finds that stand-in and sets its role to None - not back to the
-        role it arrived with, which is gone by then.
-
-        The result is one member per household silently losing their relationship to the
-        head; on a real ZISPIS batch it hit 36 of 50 households. Creating the head first
-        means the stand-in is never appointed, so nothing is ever demoted.
-
-        Only the head is moved, and the order of everyone else is preserved, so this
-        changes nothing once upstream stops needing it.
-        """
-        if not self.cfg.adapter.head_first or not records:
-            return records
-        return sorted(records, key=lambda r: 0 if self._is_head(r) else 1)
-
-    @staticmethod
-    def _is_head(record: dict) -> bool:
-        return (record.get("individual_role") == "HEAD"
-                or record.get("recipient_info") == RECIPIENT_PRIMARY)
 
     def missing_required(self, record: dict) -> list:
         """Required columns this record cannot supply.
