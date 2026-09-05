@@ -71,4 +71,8 @@ class ETLService(metaclass=abc.ABCMeta):
             "records_pulled": getattr(self, "records_pulled", 0),
             "batches_pushed": getattr(self, "batches_pushed", 0),
             "cursor": self.observed_cursor,
+            # Records the adapter could not represent (a required value was absent).
+            # Reported rather than merely logged: they were pulled but are NOT in the
+            # registry, and nothing else in the run's numbers would reveal the gap.
+            "records_skipped": len(getattr(getattr(self, "adapter", None), "skipped", ())),
         }

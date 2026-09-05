@@ -241,7 +241,9 @@ class TransformTestCase(TestCase):
             _adapter().transform(None)
 
     def test_skipped_rows_are_dropped_from_the_batch(self):
-        adapter = _adapter(external_id_field="id")
+        # required_fields off: this isolates the external_id rule. The interaction of
+        # the two is covered by RequiredFieldsTestCase.
+        adapter = _adapter(external_id_field="id", required_fields=[])
         out = adapter.transform([{"id": 1}, {"no_id": 2}, {"id": 3}])
         self.assertEqual([r["external_id"] for r in out], ["1", "3"])
 
@@ -312,3 +314,51 @@ class ImplausibleDateTestCase(TestCase):
         a = _adapter()
         self.assertEqual(a.parse_date("2015-05-25T00:00:00.000+0000"), "2015-05-25")
         self.assertIsNone(a.parse_date("0005-05-25T00:00:00.000+0000"))
+
+
+class RequiredFieldsTestCase(TestCase):
+    """A record the destination cannot store must not take the batch down with it.
+
+    `individual_individual` declares first_name, last_name and dob NOT NULL and the
+    import is a single INSERT ... SELECT, so one null aborts the statement. Against real
+    ZISPIS data 7 records in 200 had no usable date of birth and rejected the other 193.
+    """
+
+    def _adapter(self, **adapter_overrides):
+        cfg = build_source_config("t", {
+            "adapter": {
+                "field_map": {"first_name": "fn", "last_name": "ln", "dob": "d"},
+                "external_id_field": "id",
+                **adapter_overrides,
+            },
+        })
+        return BaseMappingAdapter(cfg)
+
+    def test_incomplete_record_is_held_back_and_the_rest_survive(self):
+        adapter = self._adapter()
+        out = adapter.transform([
+            {"id": "1", "fn": "Grace", "ln": "Hopper", "d": "1906-12-09"},
+            {"id": "2", "fn": "NoDob", "ln": "Person", "d": None},
+            {"id": "3", "fn": "Alan", "ln": "Turing", "d": "1912-06-23"},
+        ])
+        self.assertEqual([r["first_name"] for r in out], ["Grace", "Alan"])
+        self.assertEqual(adapter.skipped, [("2", ["dob"])])
+
+    def test_a_date_rejected_as_implausible_counts_as_missing(self):
+        # parse_date resolves an out-of-range year to None, which is exactly the value
+        # the destination cannot store - the two rules have to agree.
+        adapter = self._adapter(min_year=1900)
+        out = adapter.transform([{"id": "1", "fn": "A", "ln": "B", "d": "0002-01-01"}])
+        self.assertEqual(out, [])
+        self.assertEqual(adapter.skipped, [("1", ["dob"])])
+
+    def test_every_missing_field_is_named(self):
+        adapter = self._adapter()
+        adapter.transform([{"id": "1", "fn": "", "ln": None, "d": None}])
+        self.assertEqual(adapter.skipped, [("1", ["first_name", "last_name", "dob"])])
+
+    def test_empty_required_fields_disables_the_check(self):
+        adapter = self._adapter(required_fields=[])
+        out = adapter.transform([{"id": "1", "fn": "A", "ln": "B", "d": None}])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(adapter.skipped, [])

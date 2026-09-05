@@ -153,6 +153,13 @@ class AdapterConfig:
     # undeclared column, so declaring them here is what lets `etl_check_schema` see
     # them; otherwise the pre-flight passes and the import fails.
     extra_columns: List[str] = field(default_factory=list)
+    # Columns the DESTINATION cannot store as null. `individual_individual` declares
+    # first_name, last_name and dob NOT NULL, and the import runs as a single INSERT
+    # ... SELECT: one row missing a value aborts the statement, so a handful of
+    # incomplete records reject every good record alongside them. Rows missing any of
+    # these are held back and counted instead.
+    required_fields: List[str] = field(
+        default_factory=lambda: ["first_name", "last_name", "dob"])
 
 
 @dataclass(frozen=True)
@@ -231,7 +238,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "default_role": "OTHER_RELATIVE", "recipient_field": None,
         "national_id_field": None, "national_id_type_field": None, "date_formats": ["%Y-%m-%d"],
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
-        "extra_columns": [],
+        "extra_columns": [], "required_fields": ["first_name", "last_name", "dob"],
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,

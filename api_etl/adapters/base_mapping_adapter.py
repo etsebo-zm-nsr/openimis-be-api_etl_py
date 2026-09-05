@@ -38,6 +38,8 @@ class BaseMappingAdapter(DataAdapter):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        # (external_id, [missing field, ...]) for records held back this run.
+        self.skipped: list = []
 
     # ---------------------------------------------------------------- helpers
 
@@ -158,9 +160,37 @@ class BaseMappingAdapter(DataAdapter):
         out = []
         for row in data:
             record = self.transform_row(row)
-            if record is not None:
-                out.append(record)
+            if record is None:
+                continue
+            missing = self.missing_required(record)
+            if missing:
+                self.skipped.append((record.get("external_id"), missing))
+                continue
+            out.append(record)
+        if self.skipped:
+            by_field: dict = {}
+            for _, fields in self.skipped:
+                for name in fields:
+                    by_field[name] = by_field.get(name, 0) + 1
+            logger.warning(
+                "api_etl[%s]: held back %s of %s record(s) missing a required value "
+                "(%s). They are NOT in the registry and need a decision on how to "
+                "represent an unknown value.",
+                self.cfg.name, len(self.skipped), len(self.skipped) + len(out),
+                ", ".join(f"{k}={v}" for k, v in sorted(by_field.items())),
+            )
         return out
+
+    def missing_required(self, record: dict) -> list:
+        """Required columns this record cannot supply.
+
+        Enforced before the sink rather than inside it because the import is one
+        `INSERT ... SELECT`: a single row with a null `dob` aborts the whole statement,
+        so 7 incomplete records out of 200 reject the other 193. Holding them back is
+        not a silent drop - they are counted, logged and reported on the run.
+        """
+        return [name for name in (self.cfg.adapter.required_fields or [])
+                if record.get(name) in (None, "")]
 
     def transform_row(self, row: Any) -> Optional[dict]:
         adapter = self.cfg.adapter
