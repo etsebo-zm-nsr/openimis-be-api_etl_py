@@ -83,6 +83,10 @@ class ResponseConfig:
     status_key: Optional[str] = None    # truthy-check key for API-level errors
     message_key: Optional[str] = None
     next_key: Optional[str] = None      # cursor/next-page URL (Kobo: "next")
+    # Envelope flag saying another page exists, as an "a/b" path. Preferred over the
+    # short-page rule when a source reports it: a full last page is indistinguishable
+    # from a full middle page otherwise.
+    has_more_key: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,13 @@ class SourceHttpConfig:
     url: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
     params: Dict[str, Any] = field(default_factory=dict)
+    # Static fields merged into every request BODY, for sources whose filters are a JSON
+    # document rather than a query string. Params stay separate so a source can use both.
+    body: Dict[str, Any] = field(default_factory=dict)
+    # Where pagination and filter values are sent: "query" (a query string) or
+    # "json_body" (a JSON request body). Anything expressible in one is expressible in
+    # the other, so this is the only knob a body-driven API needs.
+    request_style: str = "query"        # query | json_body
     batch_size: int = 200
     timeout_seconds: int = 60
     max_pages: int = 0                  # 0 = unlimited; a runaway circuit breaker
@@ -102,6 +113,11 @@ class SourceHttpConfig:
     ca_bundle_path: str = ""
     offset_param: str = "current"
     limit_param: str = "rowCount"
+    # Page-NUMBER pagination (as distinct from offset/limit): which parameter carries the
+    # page index, and whether the first page is 0 or 1.
+    page_param: str = "page"
+    page_size_param: str = "pageSize"
+    first_page: int = 1
     response: ResponseConfig = field(default_factory=ResponseConfig)
 
 
@@ -121,6 +137,16 @@ class AdapterConfig:
     national_id_field: Optional[str] = None
     national_id_type_field: Optional[str] = None
     date_formats: List[str] = field(default_factory=lambda: ["%Y-%m-%d"])
+    # Collapse whitespace and strip control characters from every mapped string.
+    # Third-party exports routinely carry leading newlines and doubled spaces, and a
+    # surname that differs only by whitespace silently fails record linkage.
+    clean_whitespace: bool = True
+    # A date outside this window is not a date, it is a data-entry artefact. Such a
+    # value resolves to None rather than being stored: a null birth date is honest,
+    # a birth year of 0002 is a fact the registry would be asserting falsely.
+    # 0 disables either bound.
+    min_year: int = 1900
+    max_year: int = 0                   # 0 => "not in the future"
 
 
 @dataclass(frozen=True)
@@ -183,18 +209,22 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
     "auth": {"type": "noauth", "username": "", "password": "", "token": "",
              "header": "Authorization", "scheme": "Bearer"},
     "source": {
-        "http_method": "GET", "url": "", "headers": {}, "params": {},
+        "http_method": "GET", "url": "", "headers": {}, "params": {}, "body": {},
+        "request_style": "query",
         "batch_size": 200, "timeout_seconds": 60, "max_pages": 0,
         "retry_total": 3, "retry_backoff_factor": 1.0,
         "verify_ssl": True, "ca_bundle_path": "",
         "offset_param": "current", "limit_param": "rowCount",
-        "response": {"rows_key": None, "status_key": None, "message_key": None, "next_key": None},
+        "page_param": "page", "page_size_param": "pageSize", "first_page": 1,
+        "response": {"rows_key": None, "status_key": None, "message_key": None,
+                     "next_key": None, "has_more_key": None},
     },
     "adapter": {
         "field_map": {}, "constants": {}, "external_id_field": "id", "external_id_prefix": "",
         "group_code_field": None, "group_code_prefix": "", "role_field": None, "role_map": {},
         "default_role": "OTHER_RELATIVE", "recipient_field": None,
         "national_id_field": None, "national_id_type_field": None, "date_formats": ["%Y-%m-%d"],
+        "clean_whitespace": True, "min_year": 1900, "max_year": 0,
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,

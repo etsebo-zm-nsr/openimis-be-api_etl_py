@@ -4,11 +4,17 @@ Everything here is source-agnostic: session construction, retries, timeouts, TLS
 auth headers, response-envelope unwrapping, batch identifiers and cursor tracking.
 A connector should only have to express *how its API paginates* and *how its fields map*.
 
-Two pagination strategies cover every source seen so far:
+Three pagination strategies, each independent of *where* the values are sent:
 
-  * `iter_offset_pages()`  - offset/limit query params (ZISPIS-style).
-  * `iter_next_url_pages()` - follow an absolute "next" URL until exhausted
-    (KoboToolbox-style).
+  * `iter_offset_pages()`      - offset/limit
+  * `iter_page_number_pages()` - page/pageSize (page NUMBER, not row offset)
+  * `iter_next_url_pages()`    - follow an absolute "next" URL until exhausted
+
+`source.request_style` decides whether a paginator's values go in the query string or in
+a JSON request body, so a GET `?page=2` API and a POST `{"page": 2}` API share the same
+paginator. Where a source publishes a "more pages exist" flag, `response.has_more_key`
+uses it in preference to the short-page rule - a full FINAL page is otherwise
+indistinguishable from a full middle page.
 """
 import logging
 from datetime import datetime, timedelta
@@ -114,8 +120,21 @@ class BaseHttpSource(DataSource):
 
     # ---------------------------------------------------------------- request
 
+    def send_style(self, values: Optional[dict] = None) -> dict:
+        """Route `values` to the query string or the JSON body per `request_style`.
+
+        A source whose filters are a JSON document and one whose filters are a query
+        string differ only in where the same values go, so a paginator builds one dict
+        and this decides. `source.body` is merged underneath for the static fields such
+        an API wants on every call.
+        """
+        values = dict(values or {})
+        if self.cfg.source.request_style == "json_body":
+            return {"json_body": {**(self.cfg.source.body or {}), **values}}
+        return {"params": values}
+
     def request(self, url: Optional[str] = None, params: Optional[dict] = None,
-                method: Optional[str] = None) -> dict:
+                method: Optional[str] = None, json_body: Optional[dict] = None) -> dict:
         url = url or self.cfg.source.url
         if not url:
             raise self.Error(f"No source URL configured for {self.cfg.name!r}")
@@ -125,6 +144,7 @@ class BaseHttpSource(DataSource):
             method, url,
             headers=self.build_headers(),
             params=params,
+            json=json_body,
             timeout=self.cfg.source.timeout_seconds,
             verify=self.verify,
         )
@@ -208,19 +228,84 @@ class BaseHttpSource(DataSource):
         while True:
             if self._page_limit_reached():
                 return
-            params = {
+            values = {
                 **(source.params or {}),
                 **(extra_params or {}),
                 source.offset_param: offset,
                 source.limit_param: source.batch_size,
             }
-            rows = self.extract_rows(self.request(params=params))
+            body = self.request(**self.send_style(values))
+            rows = self.extract_rows(body)
             self._page_no += 1
             if rows:
                 yield self._emit(rows)
-            if len(rows) < source.batch_size:
+
+            has_more = self._has_more(body)
+            if has_more is None:
+                if len(rows) < source.batch_size:
+                    return
+            elif not has_more:
                 return
             offset += source.batch_size
+
+    def _has_more(self, body: Any) -> Optional[bool]:
+        """The envelope's own 'another page exists' flag, if the source reports one.
+
+        Returns None when unconfigured or absent, so a caller falls back to the
+        short-page rule. A source that reports it is more reliable than counting rows:
+        a full final page is otherwise indistinguishable from a full middle page.
+        """
+        key = self.cfg.source.response.has_more_key
+        if not key or not isinstance(body, dict):
+            return None
+        current: Any = body
+        for part in key.replace(".", "/").split("/"):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+            if current is None:
+                return None
+        if isinstance(current, bool):
+            return current
+        if isinstance(current, str):
+            return current.strip().lower() in ("true", "1", "yes")
+        return bool(current)
+
+    def iter_page_number_pages(self, extra_values: Optional[dict] = None
+                               ) -> Generator[Tuple[list, str], None, None]:
+        """Page-NUMBER pagination: `page` / `pageSize`, as opposed to offset/limit.
+
+        Values go to the query string or the JSON body per `source.request_style`, so
+        this serves both a GET `?page=2` API and a POST `{"page": 2}` one without either
+        needing its own paginator.
+
+        Stops on the envelope's `has_more_key` when the source publishes one, else on a
+        short page. `first_page` covers 0- and 1-based APIs.
+        """
+        source = self.cfg.source
+        page = source.first_page
+        while True:
+            if self._page_limit_reached():
+                return
+            values = {
+                **(source.params or {}),
+                **(extra_values or {}),
+                source.page_param: page,
+                source.page_size_param: source.batch_size,
+            }
+            body = self.request(**self.send_style(values))
+            rows = self.extract_rows(body)
+            self._page_no += 1
+            if rows:
+                yield self._emit(rows)
+
+            has_more = self._has_more(body)
+            if has_more is None:
+                if len(rows) < source.batch_size:
+                    return
+            elif not has_more:
+                return
+            page += 1
 
     def iter_next_url_pages(self, first_params: Optional[dict] = None
                             ) -> Generator[Tuple[list, str], None, None]:

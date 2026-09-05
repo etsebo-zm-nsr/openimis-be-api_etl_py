@@ -73,23 +73,58 @@ class BaseMappingAdapter(DataAdapter):
         cleaned = "".join(ch for ch in text if ch.isalnum())
         return cleaned.upper() or None
 
+    def clean_text(self, value: Any) -> Any:
+        """Collapse whitespace and drop control characters from a string value.
+
+        Third-party exports routinely carry leading newlines (`'\\nKaboyi'`) and doubled
+        internal spaces. Left alone these are invisible in a UI and corrosive underneath:
+        record linkage confirms a national-ID match on surname, and `'\\nKaboyi'` never
+        equals `'Kaboyi'`. Non-strings pass through untouched.
+        """
+        if not isinstance(value, str) or not self.cfg.adapter.clean_whitespace:
+            return value
+        return " ".join(value.split()) or None
+
+    def _plausible(self, parsed: datetime) -> bool:
+        """Reject dates that are data-entry artefacts rather than dates.
+
+        A birth year of 0002 or 1091 is not a fact the registry should assert. Storing
+        None is honest; storing the artefact both corrupts the record and silently
+        weakens linkage, which uses date of birth as one of its two confirmations.
+        """
+        adapter = self.cfg.adapter
+        if adapter.min_year and parsed.year < adapter.min_year:
+            return False
+        max_year = adapter.max_year or datetime.now().year
+        return parsed.year <= max_year
+
     def parse_date(self, value: Any) -> Optional[str]:
         if value in (None, ""):
             return None
+        parsed = None
         if isinstance(value, (datetime, date)):
-            return value.strftime("%Y-%m-%d")
-        text = str(value).strip()
-        for fmt in self.cfg.adapter.date_formats:
-            try:
-                return datetime.strptime(text[:len(datetime.now().strftime(fmt)) + 4], fmt).strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-        # ISO-8601 with a time component is the common case the formats list misses.
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y-%m-%d")
-        except ValueError:
-            logger.debug("api_etl[%s]: unparseable date %r", self.cfg.name, value)
+            parsed = datetime(value.year, value.month, value.day)
+        else:
+            text = str(value).strip()
+            for fmt in self.cfg.adapter.date_formats:
+                try:
+                    parsed = datetime.strptime(
+                        text[:len(datetime.now().strftime(fmt)) + 4], fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                # ISO-8601 with a time component is the common case the formats miss.
+                try:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                except ValueError:
+                    logger.debug("api_etl[%s]: unparseable date %r", self.cfg.name, value)
+                    return None
+        if not self._plausible(parsed):
+            logger.debug("api_etl[%s]: implausible date %r - storing nothing",
+                         self.cfg.name, value)
             return None
+        return parsed.strftime("%Y-%m-%d")
 
     def map_role(self, raw_role: Any) -> str:
         """Map a source role value to a GroupIndividual.Role attribute NAME."""
@@ -132,7 +167,7 @@ class BaseMappingAdapter(DataAdapter):
         record: dict = {}
 
         for target, path in (adapter.field_map or {}).items():
-            record[target] = self.resolve_path(row, path)
+            record[target] = self.clean_text(self.resolve_path(row, path))
         for target, value in (adapter.constants or {}).items():
             record[target] = value
 

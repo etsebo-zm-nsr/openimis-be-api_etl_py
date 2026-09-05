@@ -291,3 +291,126 @@ class NextUrlPaginationTestCase(TestCase):
         src = _make(cfg, [_Response({"results": [{"id": i}], "next": "https://kf.example/n"})
                           for i in range(10)], source_cls=_NextUrlSource)
         self.assertEqual(len(list(src.pull())), 2)
+
+
+class RequestStyleTestCase(TestCase):
+    """Where a paginator's values go is config, not code - so one paginator serves a
+    GET `?page=2` API and a POST `{"page": 2}` one."""
+
+    def test_query_style_sends_params_and_no_body(self):
+        src = _make(BASE, [_Response({"rows": []})])
+        src.request(**src.send_style({"a": 1}))
+        kwargs = src.session.request.call_args.kwargs
+        self.assertEqual(kwargs["params"], {"a": 1})
+        self.assertIsNone(kwargs["json"])
+
+    def test_json_body_style_sends_body_and_no_params(self):
+        cfg = {"source": dict(BASE["source"], request_style="json_body")}
+        src = _make(cfg, [_Response({"rows": []})])
+        src.request(**src.send_style({"a": 1}))
+        kwargs = src.session.request.call_args.kwargs
+        self.assertEqual(kwargs["json"], {"a": 1})
+        self.assertIsNone(kwargs["params"])
+
+    def test_static_body_is_merged_under_per_request_values(self):
+        """`source.body` carries the fields an API wants on every call (a sort order, an
+        include flag) without each paginator knowing about them."""
+        cfg = {"source": dict(BASE["source"], request_style="json_body",
+                              body={"sort": ["createdAt:desc"], "page": "SHOULD_LOSE"})}
+        src = _make(cfg, [_Response({"rows": []})])
+        src.request(**src.send_style({"page": 3}))
+        body = src.session.request.call_args.kwargs["json"]
+        self.assertEqual(body["sort"], ["createdAt:desc"])
+        self.assertEqual(body["page"], 3, "per-request values must win over static body")
+
+
+PAGE_BASE = {"source": {"url": "https://api.example/search", "batch_size": 2,
+                        "response": {"rows_key": "data"}}}
+
+
+class _PageSource(BaseHttpSource):
+    def pull(self):
+        yield from self.iter_page_number_pages()
+
+
+class PageNumberPaginationTestCase(TestCase):
+
+    def test_pages_until_short_page(self):
+        src = _make(PAGE_BASE, [
+            _Response({"data": [{"id": 1}, {"id": 2}]}),
+            _Response({"data": [{"id": 3}]}),
+        ], source_cls=_PageSource)
+        pages = list(src.pull())
+        self.assertEqual([len(r) for r, _ in pages], [2, 1])
+
+    def test_page_numbers_increment_from_first_page(self):
+        src = _make(PAGE_BASE, [
+            _Response({"data": [{"id": 1}, {"id": 2}]}),
+            _Response({"data": []}),
+        ], source_cls=_PageSource)
+        list(src.pull())
+        pages = [c.kwargs["params"]["page"] for c in src.session.request.call_args_list]
+        self.assertEqual(pages, [1, 2])
+
+    def test_first_page_zero_is_supported(self):
+        cfg = {"source": dict(PAGE_BASE["source"], first_page=0)}
+        src = _make(cfg, [_Response({"data": []})], source_cls=_PageSource)
+        list(src.pull())
+        self.assertEqual(src.session.request.call_args.kwargs["params"]["page"], 0)
+
+    def test_has_more_flag_beats_the_short_page_rule(self):
+        """A full FINAL page is indistinguishable from a full middle page, so a source
+        that publishes a flag must be believed over counting rows."""
+        cfg = {"source": dict(PAGE_BASE["source"],
+                              response={"rows_key": "data", "has_more_key": "pagination/hasMore"})}
+        src = _make(cfg, [
+            _Response({"data": [{"id": 1}, {"id": 2}], "pagination": {"hasMore": True}}),
+            _Response({"data": [{"id": 3}, {"id": 4}], "pagination": {"hasMore": False}}),
+            _Response({"data": [{"id": 5}, {"id": 6}]}),      # must never be requested
+        ], source_cls=_PageSource)
+        pages = list(src.pull())
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(src.session.request.call_count, 2)
+
+    def test_has_more_true_continues_past_a_short_page(self):
+        cfg = {"source": dict(PAGE_BASE["source"],
+                              response={"rows_key": "data", "has_more_key": "pagination/hasMore"})}
+        src = _make(cfg, [
+            _Response({"data": [{"id": 1}], "pagination": {"hasMore": True}}),
+            _Response({"data": [{"id": 2}], "pagination": {"hasMore": False}}),
+        ], source_cls=_PageSource)
+        self.assertEqual(len(list(src.pull())), 2)
+
+    def test_has_more_accepts_a_string_flag(self):
+        cfg = {"source": dict(PAGE_BASE["source"],
+                              response={"rows_key": "data", "has_more_key": "pagination/hasMore"})}
+        src = _make(cfg, [
+            _Response({"data": [{"id": 1}, {"id": 2}], "pagination": {"hasMore": "false"}}),
+        ], source_cls=_PageSource)
+        self.assertEqual(len(list(src.pull())), 1)
+
+    def test_missing_has_more_falls_back_to_short_page(self):
+        cfg = {"source": dict(PAGE_BASE["source"],
+                              response={"rows_key": "data", "has_more_key": "pagination/hasMore"})}
+        src = _make(cfg, [_Response({"data": [{"id": 1}]})], source_cls=_PageSource)
+        self.assertEqual(len(list(src.pull())), 1)
+
+    def test_max_pages_still_applies(self):
+        cfg = {"source": dict(PAGE_BASE["source"], max_pages=2)}
+        src = _make(cfg, [_Response({"data": [{"id": i}, {"id": i + 1}]}) for i in range(9)],
+                    source_cls=_PageSource)
+        self.assertEqual(len(list(src.pull())), 2)
+
+    def test_paginates_over_a_json_body_api(self):
+        cfg = {"source": dict(PAGE_BASE["source"], request_style="json_body",
+                              body={"includeAssessment": True})}
+        src = _make(cfg, [
+            _Response({"data": [{"id": 1}, {"id": 2}]}),
+            _Response({"data": []}),
+        ], source_cls=_PageSource)
+        list(src.pull())
+        first = src.session.request.call_args_list[0].kwargs["json"]
+        self.assertEqual(first["page"], 1)
+        self.assertEqual(first["pageSize"], 2)
+        self.assertIs(first["includeAssessment"], True)
+        self.assertIsNone(src.session.request.call_args_list[0].kwargs["params"])

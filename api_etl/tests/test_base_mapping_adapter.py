@@ -247,3 +247,68 @@ class TransformTestCase(TestCase):
 
     def test_empty_batch(self):
         self.assertEqual(list(_adapter().transform([])), [])
+
+
+class CleanTextTestCase(TestCase):
+    """Third-party exports carry stray whitespace. A surname differing only by a leading
+    newline silently fails the linkage confirmation that keys on surname."""
+
+    def test_strips_and_collapses(self):
+        a = _adapter()
+        self.assertEqual(a.clean_text("  Banda  "), "Banda")
+        self.assertEqual(a.clean_text("\nKaboyi"), "Kaboyi")
+        self.assertEqual(a.clean_text("Josphat  \n Kaboyi"), "Josphat Kaboyi")
+        self.assertEqual(a.clean_text("a\tb"), "a b")
+
+    def test_whitespace_only_becomes_none(self):
+        self.assertIsNone(_adapter().clean_text("   \n "))
+
+    def test_non_strings_pass_through(self):
+        a = _adapter()
+        for v in (None, 5, 1.5, True, ["x"]):
+            self.assertEqual(a.clean_text(v), v)
+
+    def test_can_be_disabled(self):
+        self.assertEqual(_adapter(clean_whitespace=False).clean_text("\nKaboyi"), "\nKaboyi")
+
+    def test_mapped_values_are_cleaned_end_to_end(self):
+        adapter = _adapter(field_map={"last_name": "ln"}, external_id_field="id")
+        record = adapter.transform_row({"id": 1, "ln": "\nKaboyi "})
+        self.assertEqual(record["last_name"], "Kaboyi")
+
+    def test_two_sources_spelling_a_surname_differently_now_agree(self):
+        """The property linkage depends on."""
+        a = _adapter(field_map={"last_name": "ln"}, external_id_field="id")
+        self.assertEqual(a.transform_row({"id": 1, "ln": "\nBanda"})["last_name"],
+                         a.transform_row({"id": 2, "ln": "Banda  "})["last_name"])
+
+
+class ImplausibleDateTestCase(TestCase):
+    """~2% of ZISPIS birth dates are years like 0002 or 1091. Storing None is honest;
+    storing the artefact asserts a false fact AND weakens linkage, which confirms a
+    national-ID match on date of birth."""
+
+    def test_year_below_the_floor_is_rejected(self):
+        a = _adapter()
+        self.assertIsNone(a.parse_date("0002-05-25"))
+        self.assertIsNone(a.parse_date("1091-05-11"))
+
+    def test_plausible_date_survives(self):
+        self.assertEqual(_adapter().parse_date("1990-04-05"), "1990-04-05")
+
+    def test_future_date_is_rejected_by_default(self):
+        self.assertIsNone(_adapter().parse_date("2999-01-01"))
+
+    def test_floor_is_configurable(self):
+        self.assertEqual(_adapter(min_year=1800).parse_date("1850-01-01"), "1850-01-01")
+
+    def test_floor_can_be_disabled(self):
+        self.assertEqual(_adapter(min_year=0).parse_date("0002-05-25"), "0002-05-25")
+
+    def test_explicit_ceiling_is_honoured(self):
+        self.assertIsNone(_adapter(max_year=2000).parse_date("2010-01-01"))
+
+    def test_iso_with_offset_is_parsed_then_range_checked(self):
+        a = _adapter()
+        self.assertEqual(a.parse_date("2015-05-25T00:00:00.000+0000"), "2015-05-25")
+        self.assertIsNone(a.parse_date("0005-05-25T00:00:00.000+0000"))
