@@ -89,3 +89,37 @@ class ReconcileHouseholdRolesTestCase(TestCase):
         self.assertEqual(summary["groups"], 0)
         self.assertEqual(summary["no_source"], 1)
         self.assertEqual(self._state()["Other"][0], "SPOUSE")
+
+
+class RoleValueTestCase(TestCase):
+    """A Role's attribute name and its stored value differ for some roles. Writing the
+    name into the column stores a value outside the field's choices."""
+
+    def test_names_that_differ_from_their_value_are_translated(self):
+        from api_etl.household_roles import role_value
+        self.assertEqual(role_value("OTHER_RELATIVE"), "OTHER RELATIVE")
+        self.assertEqual(role_value("NOT_RELATED"), "NOT RELATED")
+
+    def test_names_that_match_their_value_are_unchanged(self):
+        from api_etl.household_roles import role_value
+        self.assertEqual(role_value("HEAD"), "HEAD")
+        self.assertEqual(role_value("DAUGHTER"), "DAUGHTER")
+
+    def test_unknown_and_empty_resolve_to_none(self):
+        from api_etl.household_roles import role_value
+        self.assertIsNone(role_value("NOT_A_ROLE"))
+        self.assertIsNone(role_value(None))
+        self.assertIsNone(role_value(""))
+
+
+class StoredRoleIsAValidChoiceTestCase(ReconcileHouseholdRolesTestCase):
+
+    def test_repair_writes_the_choice_value_not_the_attribute_name(self):
+        from individual.models import GroupIndividual
+        valid = {value for value, _ in GroupIndividual.Role.choices}
+        self._member("Cousin", "OTHER_RELATIVE", role=None, recipient_type="PRIMARY")
+        self._member("Mary", "HEAD", role="HEAD", recipient_type=None)
+        reconcile_household_roles(group_codes=["TEST-HH-1"])
+        stored = self._state()["Cousin"][0]
+        self.assertEqual(stored, "OTHER RELATIVE")
+        self.assertIn(stored, valid)

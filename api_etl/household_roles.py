@@ -31,6 +31,22 @@ HEAD = "HEAD"
 PRIMARY = "PRIMARY"
 
 
+def role_value(name):
+    """Map a Role ATTRIBUTE name to the value the column stores.
+
+    They are not the same string for every role: `Role.OTHER_RELATIVE` is stored as
+    "OTHER RELATIVE", and `NOT_RELATED` as "NOT RELATED". Adapters emit attribute names
+    because that is what `_individual_role_parser` expects, so writing one straight into
+    the column would store a value outside the field's choices - invisible until
+    something asks for its display name.
+    """
+    from individual.models import GroupIndividual
+
+    if not name:
+        return None
+    return getattr(GroupIndividual.Role, str(name).strip().upper(), None)
+
+
 def reconcile_household_roles(group_codes=None, dry_run=False):
     """Repair roles and recipient for the given group codes (all ETL groups if None).
 
@@ -51,7 +67,7 @@ def reconcile_household_roles(group_codes=None, dry_run=False):
         )
         intended = {}
         for member in members:
-            role = (member.individual.json_ext or {}).get("household_role")
+            role = role_value((member.individual.json_ext or {}).get("household_role"))
             if role:
                 intended[member.id] = role
         if not intended:
@@ -62,7 +78,7 @@ def reconcile_household_roles(group_codes=None, dry_run=False):
         summary["groups"] += 1
         wrong_role = [m for m in members
                       if m.id in intended and m.role != intended[m.id]]
-        heads = [m for m in members if intended.get(m.id) == HEAD]
+        heads = [m for m in members if intended.get(m.id) == role_value(HEAD)]
         wrong_recipient = []
         if heads:
             head = heads[0]
