@@ -160,6 +160,10 @@ class AdapterConfig:
     # these are held back and counted instead.
     required_fields: List[str] = field(
         default_factory=lambda: ["first_name", "last_name", "dob"])
+    # Emit each household's head before its other members. See
+    # BaseMappingAdapter.order_batch - this works around an upstream role-corruption
+    # bug and costs nothing when the bug is fixed.
+    head_first: bool = True
 
 
 @dataclass(frozen=True)
@@ -239,6 +243,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "national_id_field": None, "national_id_type_field": None, "date_formats": ["%Y-%m-%d"],
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
         "extra_columns": [], "required_fields": ["first_name", "last_name", "dob"],
+        "head_first": True,
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,
