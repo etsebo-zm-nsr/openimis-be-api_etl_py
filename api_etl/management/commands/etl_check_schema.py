@@ -43,7 +43,8 @@ def emitted_columns(config):
     if adapter.national_id_type_field:
         emitted.add("national_id_type")
     if adapter.group_code_field:
-        emitted |= {GROUP_AGGREGATION_COLUMN, "household_ref", "individual_role"}
+        emitted |= {GROUP_AGGREGATION_COLUMN, "household_ref", "individual_role",
+                    "household_role"}
         if adapter.recipient_field:
             emitted.add("recipient_info")
     if config.provenance.data_source_label:

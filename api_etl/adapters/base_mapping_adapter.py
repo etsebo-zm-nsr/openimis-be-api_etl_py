@@ -231,9 +231,15 @@ class BaseMappingAdapter(DataAdapter):
                 # household_ref keeps an untouched copy for traceability.
                 record["group_code"] = group_code
                 record["household_ref"] = group_code
-                record["individual_role"] = self.map_role(
+                role = self.map_role(
                     self.resolve_path(row, adapter.role_field) if adapter.role_field else None
                 )
+                record["individual_role"] = role
+                # A durable copy. `individual_role` is stripped from the individual by
+                # `_clean_json_ext()` once grouping is done, and grouping is exactly
+                # where upstream loses roles - so the value has to outlive it for
+                # `reconcile_household_roles` to have anything to restore from.
+                record["household_role"] = role
                 if adapter.recipient_field:
                     record["recipient_info"] = self.map_recipient(
                         self.resolve_path(row, adapter.recipient_field)
