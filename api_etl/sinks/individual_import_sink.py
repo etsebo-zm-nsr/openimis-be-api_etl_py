@@ -348,6 +348,23 @@ class IndividualImportSink(DataSink):
 
     # ---------------------------------------------------------------- linkage
 
+    def _find_by_national_id(self, national_ids) -> dict:
+        """Existing individuals holding any of these national ids. One query per batch.
+
+        Used only for FLAGGING - see _flag_national_id_matches. Nothing here adopts an
+        identity; duplicate NRCs are issued in Zambia and a shared id is a question, not
+        an answer.
+        """
+        matches: dict = {}
+        rows = (Individual.objects
+                .filter(json_ext__national_id__in=list(national_ids), is_deleted=False)
+                .values("id", "dob", "last_name", "json_ext"))
+        for row in rows:
+            key = _normalise_national_id((row.get("json_ext") or {}).get("national_id"))
+            if key:
+                matches.setdefault(key, []).append(row)
+        return matches
+
     @property
     def _identity_link_enabled(self):
         return not self.cfg or self.cfg.sink.link_on_identity_key
