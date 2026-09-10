@@ -160,6 +160,27 @@ class AdapterConfig:
     # these are held back and counted instead.
     required_fields: List[str] = field(
         default_factory=lambda: ["first_name", "last_name", "dob"])
+    # THE single definition of "same person" for this source. Listed as OUTPUT column
+    # names, so it is readable and changeable in one place - here in DEFAULT_CONFIG, or
+    # overridden per deployment in ModuleConfiguration - rather than compiled into the
+    # linkage code. The adapter hashes these into an `identity_key` column and the sink
+    # matches on it.
+    #
+    # Measured over 5,000 live ZISPIS records (collision = two different source records
+    # sharing the key):
+    #     national_id alone .................. 34% coverage, 0.94% collisions
+    #     first+last+yob+sex .................. 99.9% coverage, 0.24%
+    #     first+last+yob+sex+district ........ 99.9% coverage, 0.04%   <- default
+    # The one collision the default still produces was inspected and is a genuine
+    # duplicate record, not two different people.
+    #
+    # Empty disables identity matching entirely (external_id remains).
+    identity_key_fields: List[str] = field(default_factory=lambda: [
+        "first_name", "last_name", "year_of_birth", "sex", "district"])
+    # Row filter applied after mapping: {column: [allowed, values]}. Empty = keep every
+    # row. Configurable because a source's own filters may be unusable - ZISPIS accepts
+    # unknown filter keys and silently ignores them, so filtering has to happen here.
+    include_when: Dict[str, List[Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -169,8 +190,25 @@ class SinkConfig:
     import_workflow: str = "Python Import Individuals"
     update_workflow: str = "Python Update Individuals"
     workflow_group: str = "individual"
-    link_on_national_id: bool = True
-    link_requires_secondary_match: bool = True
+    # There is deliberately NO "link on national id" switch.
+    #
+    # Zambia issues duplicate NRCs to different people - confirmed by the ZISPIS team as
+    # a known national problem, with a deduplication programme still to come. A shared
+    # NRC does NOT mean "same person", and merging on it would fuse two different human
+    # beings in the national registry. Measured: 0.94% of NRC-bearing records collide,
+    # and NRC is present on only 34% of them.
+    #
+    # A source whose identifier IS trustworthy expresses that through the one
+    # configurable place - `adapter.identity_key_fields: ["national_id"]` - rather than
+    # through a second, parallel linkage mechanism here.
+    #
+    # Match on the identity key built from `adapter.identity_key_fields`. This is the
+    # linkage path that replaces national id.
+    link_on_identity_key: bool = True
+    # Record national-id matches WITHOUT merging: writes linkage_candidate_id and a note
+    # so the future deduplication mechanism has the candidate pairs, and a caseworker
+    # can see why a record was suspected. Detection is useful; auto-merging is not.
+    flag_national_id_matches: bool = True
 
 
 @dataclass(frozen=True)
@@ -239,13 +277,15 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "national_id_field": None, "national_id_type_field": None, "date_formats": ["%Y-%m-%d"],
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
         "extra_columns": [], "required_fields": ["first_name", "last_name", "dob"],
+        "identity_key_fields": ["first_name", "last_name", "year_of_birth", "sex", "district"],
+        "include_when": {},
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,
         "import_workflow": "Python Import Individuals",
         "update_workflow": "Python Update Individuals",
         "workflow_group": "individual",
-        "link_on_national_id": True, "link_requires_secondary_match": True,
+        "link_on_identity_key": True, "flag_national_id_matches": True,
     },
     "incremental": {"enabled": False, "mode": "none", "cursor_field": None,
                     "cursor_param": None, "overlap_minutes": 15, "initial_cursor": None},

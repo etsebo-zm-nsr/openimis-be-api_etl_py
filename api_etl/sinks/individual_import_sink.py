@@ -254,101 +254,107 @@ class IndividualImportSink(DataSink):
             else:
                 unmatched.append(record)
 
-        linked, new_records = self._link_by_national_id(unmatched)
+        linked, new_records = self._link_by_identity_key(unmatched)
         existing_records.extend(linked)
+        # National id never merges - it only annotates. See _flag_national_id_matches.
+        self._flag_national_id_matches(new_records)
         return existing_records, new_records
 
-    # ---------------------------------------------------------------- linkage
+    # ------------------------------------------------------- identity linkage
 
-    def _link_by_national_id(self, records: list[dict]) -> tuple[list[dict], list[dict]]:
-        if not records or not self._link_enabled:
+    def _link_by_identity_key(self, records: list[dict]) -> tuple[list[dict], list[dict]]:
+        """Stage 2: match on the configured identity key.
+
+        The key is defined once, as `adapter.identity_key_fields`, and computed by the
+        adapter - so what counts as "the same person" is configuration, not logic buried
+        here. Records without a complete key carry no `identity_key` and fall through to
+        NEW rather than matching on a partial one.
+        """
+        if not records or not self._identity_link_enabled:
             return [], records
 
-        candidates = {
-            _normalise_national_id(r.get("national_id"))
-            for r in records if r.get("national_id")
-        }
-        candidates.discard(None)
-        if not candidates:
+        keys = {r.get("identity_key") for r in records}
+        keys.discard(None)
+        if not keys:
             return [], records
 
-        matches = self._find_by_national_id(candidates)
+        matches: dict = {}
+        rows = (Individual.objects
+                .filter(json_ext__identity_key__in=list(keys), is_deleted=False)
+                .values("id", "json_ext"))
+        for row in rows:
+            key = (row.get("json_ext") or {}).get("identity_key")
+            if key:
+                matches.setdefault(key, []).append(row)
 
         linked, new_records = [], []
         for record in records:
-            national_id = _normalise_national_id(record.get("national_id"))
-            found = matches.get(national_id) if national_id else None
-
+            found = matches.get(record.get("identity_key"))
             if not found:
                 new_records.append(record)
-                continue
-
-            if len(found) > 1:
-                # Ambiguous: the same national id already appears on several people.
-                # Never guess - import as new and leave it for a checker.
+            elif len(found) > 1:
+                # The key was supposed to be discriminating; if several people share it,
+                # trusting it here would merge whichever came first.
                 record["linkage_candidate_id"] = ",".join(str(m["id"]) for m in found[:5])
                 record["linkage_note"] = (
-                    f"national_id matches {len(found)} existing individuals; "
+                    f"identity key matches {len(found)} existing individuals; "
                     f"imported as new pending review"
                 )
                 new_records.append(record)
-                continue
-
-            match = found[0]
-            if self._secondary_matches(record, match):
-                record["ID"] = match["id"]
-                record["alt_external_ids"] = _merge_alt_ids(match, record)
-                linked.append(record)
             else:
-                record["linkage_candidate_id"] = str(match["id"])
-                record["linkage_note"] = (
-                    "national_id matched but neither dob nor last_name agreed; "
-                    "imported as new pending review"
-                )
-                new_records.append(record)
+                record["ID"] = found[0]["id"]
+                record["alt_external_ids"] = _merge_alt_ids(found[0], record)
+                linked.append(record)
 
         if linked:
-            logger.info("api_etl[%s]: linked %s incoming record(s) to existing individuals "
-                        "by national_id", getattr(self.cfg, "name", "?"), len(linked))
+            logger.info("api_etl[%s]: linked %s incoming record(s) by identity key",
+                        getattr(self.cfg, "name", "?"), len(linked))
         return linked, new_records
 
-    @property
-    def _link_enabled(self):
-        return bool(self.cfg and self.cfg.sink.link_on_national_id)
+    def _flag_national_id_matches(self, records: list[dict]) -> None:
+        """Annotate national-id collisions WITHOUT merging.
 
-    @property
-    def _require_secondary(self):
-        return not self.cfg or self.cfg.sink.link_requires_secondary_match
+        Zambia issues duplicate NRCs to different people - a known national problem, with
+        deduplication still to come. Merging on a shared NRC would fuse two different
+        human beings, so this only records the candidates, giving the future dedup work
+        its input and a caseworker the reason a record was suspected.
 
-    def _find_by_national_id(self, national_ids) -> dict:
-        """One query per batch, resolved in Python."""
-        matches = {}
-        rows = (Individual.objects
-                .filter(json_ext__national_id__in=list(national_ids), is_deleted=False)
-                .values("id", "dob", "last_name", "json_ext"))
-        for row in rows:
-            key = _normalise_national_id((row.get("json_ext") or {}).get("national_id"))
-            if key:
-                matches.setdefault(key, []).append(row)
-        return matches
-
-    def _secondary_matches(self, record, match) -> bool:
-        """Guard against a transcription error in the national id.
-
-        A single mistyped digit should not merge two different people, so require the
-        DOB or the surname to agree as well.
+        Never sets record["ID"], so nothing is ever adopted on this evidence.
         """
-        if not self._require_secondary:
-            return True
+        if not records or not self._flag_nid_enabled:
+            return
+        candidates = {_normalise_national_id(r.get("national_id")) for r in records}
+        candidates.discard(None)
+        if not candidates:
+            return
+        matches = self._find_by_national_id(candidates)
+        flagged = 0
+        for record in records:
+            if record.get("linkage_note"):        # identity-key note takes precedence
+                continue
+            national_id = _normalise_national_id(record.get("national_id"))
+            found = matches.get(national_id) if national_id else None
+            if not found:
+                continue
+            record["linkage_candidate_id"] = ",".join(str(m["id"]) for m in found[:5])
+            record["linkage_note"] = (
+                f"national_id shared with {len(found)} existing individual(s); "
+                f"NOT merged - duplicate NRCs are issued in Zambia. For review."
+            )
+            flagged += 1
+        if flagged:
+            logger.info("api_etl[%s]: flagged %s record(s) sharing a national id "
+                        "(not merged)", getattr(self.cfg, "name", "?"), flagged)
 
-        record_dob = str(record.get("dob") or "").strip()
-        match_dob = match.get("dob")
-        if record_dob and match_dob and record_dob == match_dob.strftime("%Y-%m-%d"):
-            return True
+    # ---------------------------------------------------------------- linkage
 
-        record_last = str(record.get("last_name") or "").strip().upper()
-        match_last = str(match.get("last_name") or "").strip().upper()
-        return bool(record_last) and record_last == match_last
+    @property
+    def _identity_link_enabled(self):
+        return not self.cfg or self.cfg.sink.link_on_identity_key
+
+    @property
+    def _flag_nid_enabled(self):
+        return not self.cfg or self.cfg.sink.flag_national_id_matches
 
     def _get_existing_individual_ids(self, data_ids: list, model_lookup_field: str) -> dict:
         filter_kwargs = {f"{model_lookup_field}__in": data_ids}

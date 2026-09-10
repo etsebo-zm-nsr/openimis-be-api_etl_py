@@ -31,6 +31,9 @@ MAGIC_COLUMNS = {"recipient_info", GROUP_AGGREGATION_COLUMN, "individual_role"}
 # arrives. Counting them here makes that failure impossible to reach.
 LINKAGE_COLUMNS = {"alt_external_ids", "linkage_candidate_id", "linkage_note"}
 
+# The identity key the sink matches on, hashed from `adapter.identity_key_fields`.
+IDENTITY_COLUMN = "identity_key"
+
 
 def emitted_columns(config):
     """Columns this connector's configuration will put on a row."""
@@ -50,7 +53,9 @@ def emitted_columns(config):
     if config.provenance.data_source_label:
         emitted.add("beneficiary_data_source")
     emitted |= set(adapter.extra_columns or ())
-    if config.sink.link_on_national_id:
+    if adapter.identity_key_fields:
+        emitted.add("identity_key")
+    if config.sink.link_on_identity_key or config.sink.flag_national_id_matches:
         emitted |= LINKAGE_COLUMNS
     return emitted
 

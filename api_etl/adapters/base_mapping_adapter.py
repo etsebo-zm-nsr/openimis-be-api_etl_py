@@ -18,7 +18,10 @@ wrong is silent and damaging:
 * `external_id` and `group_code` are namespaced per source, so two sources' identifier
   spaces cannot collide.
 """
+import hashlib
 import logging
+import re
+import unicodedata
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
@@ -40,6 +43,8 @@ class BaseMappingAdapter(DataAdapter):
         self.cfg = cfg
         # (external_id, [missing field, ...]) for records held back this run.
         self.skipped: list = []
+        # Rows excluded by `adapter.include_when` - a deliberate filter, not a fault.
+        self.filtered: int = 0
 
     # ---------------------------------------------------------------- helpers
 
@@ -166,6 +171,12 @@ class BaseMappingAdapter(DataAdapter):
             if missing:
                 self.skipped.append((record.get("external_id"), missing))
                 continue
+            if not self.keep_row(record):
+                self.filtered += 1
+                continue
+            key = self.identity_key(record)
+            if key:
+                record["identity_key"] = key
             out.append(record)
         if self.skipped:
             by_field: dict = {}
@@ -180,6 +191,52 @@ class BaseMappingAdapter(DataAdapter):
                 ", ".join(f"{k}={v}" for k, v in sorted(by_field.items())),
             )
         return out
+
+    @staticmethod
+    def normalise_component(value: Any) -> Optional[str]:
+        """Fold a value to its comparable form for the identity key.
+
+        Case, accents, punctuation and spacing all vary between a MIS export and a field
+        submission for the same person - "O'Brien" / "OBRIEN", "MWEMBE  ZHI". Two
+        spellings that differ only in those respects must produce the same key, or
+        linkage silently fails and the registry gains a duplicate person.
+        """
+        if value in (None, ""):
+            return None
+        text = unicodedata.normalize("NFKD", str(value)).upper()
+        text = re.sub(r"[^A-Z0-9]+", " ", text)
+        return " ".join(text.split()) or None
+
+    def identity_key(self, record: dict) -> Optional[str]:
+        """Stable hash of `adapter.identity_key_fields`, or None if any part is missing.
+
+        None rather than a partial key on purpose: a key built from three of five
+        components matches far too many people. A record that cannot supply the whole
+        key simply does not participate in identity matching, and imports as new.
+
+        Hashed rather than stored as the concatenation because this column is queried in
+        bulk and would otherwise duplicate name and birth-year data into a second
+        readable place.
+        """
+        fields = self.cfg.adapter.identity_key_fields or []
+        if not fields:
+            return None
+        parts = []
+        for name in fields:
+            component = self.normalise_component(record.get(name))
+            if component is None:
+                return None
+            parts.append(component)
+        joined = "|".join(parts)
+        return hashlib.blake2s(joined.encode("utf-8"), digest_size=16).hexdigest()
+
+    def keep_row(self, record: dict) -> bool:
+        """Apply `adapter.include_when`. Empty config keeps everything."""
+        rules = self.cfg.adapter.include_when or {}
+        for column, allowed in rules.items():
+            if record.get(column) not in list(allowed or []):
+                return False
+        return True
 
     def missing_required(self, record: dict) -> list:
         """Required columns this record cannot supply.

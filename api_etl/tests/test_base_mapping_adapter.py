@@ -362,3 +362,105 @@ class RequiredFieldsTestCase(TestCase):
         out = adapter.transform([{"id": "1", "fn": "A", "ln": "B", "d": None}])
         self.assertEqual(len(out), 1)
         self.assertEqual(adapter.skipped, [])
+
+
+class IdentityKeyTestCase(TestCase):
+    """The identity key replaces national id as the linkage signal.
+
+    Zambia issues duplicate NRCs to different people, so a shared NRC identifies nobody.
+    The key is defined once in `adapter.identity_key_fields`.
+    """
+
+    def _adapter(self, **overrides):
+        cfg = build_source_config("t", {
+            "adapter": {
+                "field_map": {"first_name": "fn", "last_name": "ln", "dob": "d",
+                              "year_of_birth": "yob", "sex": "sx", "district": "dist"},
+                "external_id_field": "id",
+                **overrides,
+            },
+        })
+        return BaseMappingAdapter(cfg)
+
+    ROW = {"id": "1", "fn": "Mary", "ln": "Banda", "d": "1985-03-12",
+           "yob": 1985, "sx": "FEMALE", "dist": "MWANDI"}
+
+    def test_same_person_spelled_differently_gets_the_same_key(self):
+        a = self._adapter()
+        k1 = a.identity_key(a.transform_row(self.ROW))
+        k2 = a.identity_key(a.transform_row(
+            dict(self.ROW, fn="  mary ", ln="BANDA", dist="mwandi")))
+        self.assertEqual(k1, k2)
+
+    def test_different_district_gives_a_different_key(self):
+        a = self._adapter()
+        self.assertNotEqual(
+            a.identity_key(a.transform_row(self.ROW)),
+            a.identity_key(a.transform_row(dict(self.ROW, dist="KAOMA"))),
+        )
+
+    def test_incomplete_key_is_none_not_partial(self):
+        """A key missing a component would match far too many people."""
+        a = self._adapter()
+        self.assertIsNone(a.identity_key(a.transform_row(dict(self.ROW, dist=None))))
+
+    def test_row_without_a_complete_key_carries_no_identity_key_column(self):
+        out = self._adapter().transform([dict(self.ROW, sx=None)])
+        self.assertNotIn("identity_key", out[0])
+
+    def test_key_is_emitted_when_complete(self):
+        out = self._adapter().transform([self.ROW])
+        self.assertEqual(len(out[0]["identity_key"]), 32)
+
+    def test_empty_field_list_disables_the_key(self):
+        a = self._adapter(identity_key_fields=[])
+        self.assertIsNone(a.identity_key(a.transform_row(self.ROW)))
+
+    def test_national_id_is_not_part_of_the_default_key(self):
+        from api_etl.config import SOURCE_DEFAULTS
+        self.assertNotIn("national_id", SOURCE_DEFAULTS["adapter"]["identity_key_fields"])
+
+
+class IncludeWhenTestCase(TestCase):
+    """Filtering happens here because ZISPIS accepts unknown filter keys and silently
+    ignores them - a server-side filter would look applied and do nothing."""
+
+    def _adapter(self, **overrides):
+        cfg = build_source_config("t", {
+            "adapter": {
+                "field_map": {"first_name": "fn", "last_name": "ln", "dob": "d",
+                              "status": "st"},
+                "external_id_field": "id",
+                **overrides,
+            },
+        })
+        return BaseMappingAdapter(cfg)
+
+    ROWS = [
+        {"id": "1", "fn": "A", "ln": "B", "d": "1990-01-01", "st": "ACTIVE"},
+        {"id": "2", "fn": "C", "ln": "D", "d": "1990-01-01", "st": "SUSPENDED"},
+        {"id": "3", "fn": "E", "ln": "F", "d": "1990-01-01", "st": "GRADUATED"},
+    ]
+
+    def test_default_keeps_every_row(self):
+        adapter = self._adapter()
+        self.assertEqual(len(adapter.transform(self.ROWS)), 3)
+        self.assertEqual(adapter.filtered, 0)
+
+    def test_filter_keeps_only_matching_rows(self):
+        adapter = self._adapter(include_when={"status": ["ACTIVE"]})
+        out = adapter.transform(self.ROWS)
+        self.assertEqual([r["status"] for r in out], ["ACTIVE"])
+        self.assertEqual(adapter.filtered, 2)
+
+    def test_filter_accepts_several_values(self):
+        adapter = self._adapter(include_when={"status": ["ACTIVE", "SUSPENDED"]})
+        self.assertEqual(len(adapter.transform(self.ROWS)), 2)
+
+    def test_filtered_rows_are_not_counted_as_skipped(self):
+        """A deliberate exclusion is not a data fault - conflating them would hide
+        records that were dropped because they were unusable."""
+        adapter = self._adapter(include_when={"status": ["ACTIVE"]})
+        adapter.transform(self.ROWS)
+        self.assertEqual(adapter.skipped, [])
+        self.assertEqual(adapter.filtered, 2)
