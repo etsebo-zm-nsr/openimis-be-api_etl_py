@@ -270,7 +270,7 @@ class IndividualImportSink(DataSink):
         here. Records without a complete key carry no `identity_key` and fall through to
         NEW rather than matching on a partial one.
         """
-        if not records or not self._identity_link_enabled:
+        if not records:
             return [], records
 
         keys = {r.get("identity_key") for r in records}
@@ -292,12 +292,17 @@ class IndividualImportSink(DataSink):
             found = matches.get(record.get("identity_key"))
             if not found:
                 new_records.append(record)
-            elif len(found) > 1:
-                # The key was supposed to be discriminating; if several people share it,
-                # trusting it here would merge whichever came first.
+            elif len(found) > 1 or not self._identity_link_enabled:
+                # Two reasons not to adopt:
+                #   * several people share the key - trusting it would merge whichever
+                #     came first;
+                #   * linking is off, the default. The key is a heuristic, and fusing two
+                #     different people is much harder to detect and undo than leaving a
+                #     duplicate for review. The candidates are recorded either way, which
+                #     is what a post-import deduplication step needs.
                 record["linkage_candidate_id"] = ",".join(str(m["id"]) for m in found[:5])
                 record["linkage_note"] = (
-                    f"identity key matches {len(found)} existing individuals; "
+                    f"identity key matches {len(found)} existing individual(s); "
                     f"imported as new pending review"
                 )
                 new_records.append(record)

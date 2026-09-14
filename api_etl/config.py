@@ -202,9 +202,21 @@ class SinkConfig:
     # configurable place - `adapter.identity_key_fields: ["national_id"]` - rather than
     # through a second, parallel linkage mechanism here.
     #
-    # Match on the identity key built from `adapter.identity_key_fields`. This is the
-    # linkage path that replaces national id.
-    link_on_identity_key: bool = True
+    # Auto-merge two records whose identity key matches. OFF by default.
+    #
+    # A composite key is a heuristic, not proof. first+last+year_of_birth+sex+district
+    # measured 0.04% collisions on live data - which on 100,000 records is ~40 different
+    # people fused into one, and a wrongly merged person is far harder to detect and undo
+    # than a duplicate left for review. Real populations legitimately contain
+    # same-name-same-age-same-district people, and dummy data understates that.
+    #
+    # So identity matching DETECTS and records candidates; deduplication is a reviewed
+    # step after import, not a silent decision during it. The source's own stable
+    # identifier (external_id) remains the only thing that adopts an existing record.
+    #
+    # Set True only where a source's key has been shown to be an identifier rather than
+    # a good guess.
+    link_on_identity_key: bool = False
     # Record national-id matches WITHOUT merging: writes linkage_candidate_id and a note
     # so the future deduplication mechanism has the candidate pairs, and a caseworker
     # can see why a record was suspected. Detection is useful; auto-merging is not.
@@ -285,7 +297,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "import_workflow": "Python Import Individuals",
         "update_workflow": "Python Update Individuals",
         "workflow_group": "individual",
-        "link_on_identity_key": True, "flag_national_id_matches": True,
+        "link_on_identity_key": False, "flag_national_id_matches": True,
     },
     "incremental": {"enabled": False, "mode": "none", "cursor_field": None,
                     "cursor_param": None, "overlap_minutes": 15, "initial_cursor": None},

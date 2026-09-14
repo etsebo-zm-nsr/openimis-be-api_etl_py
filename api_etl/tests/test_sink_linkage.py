@@ -52,10 +52,20 @@ class SinkLinkageTestCase(TestCase):
 
     # ---------------------------------------------------------- identity key
 
-    def test_identity_key_adopts_the_existing_person(self):
+    def test_identity_key_does_not_merge_by_default(self):
+        """The default posture: detect, record, never fuse two people silently."""
         existing = self._existing(external_id="zispis:1", identity_key="abc123")
         updated, new = self._split([{"external_id": "kobo:9", "identity_key": "abc123"}])
-        self.assertEqual(len(updated), 1, "a person known from another source must link")
+        self.assertEqual(updated, [])
+        self.assertNotIn("ID", new[0])
+        self.assertEqual(new[0]["linkage_candidate_id"], str(existing.id))
+        self.assertIn("pending review", new[0]["linkage_note"])
+
+    def test_identity_key_adopts_only_when_explicitly_enabled(self):
+        existing = self._existing(external_id="zispis:1", identity_key="abc123")
+        updated, new = self._split([{"external_id": "kobo:9", "identity_key": "abc123"}],
+                                   cfg=_cfg(link_on_identity_key=True))
+        self.assertEqual(len(updated), 1)
         self.assertEqual(str(updated[0]["ID"]), str(existing.id))
 
     def test_ambiguous_identity_key_is_flagged_not_merged(self):
@@ -73,13 +83,12 @@ class SinkLinkageTestCase(TestCase):
         self.assertEqual(updated, [])
         self.assertEqual(len(new), 1)
 
-    def test_identity_linking_can_be_disabled(self):
-        self._existing(external_id="zispis:1", identity_key="abc123")
-        updated, new = self._split(
-            [{"external_id": "kobo:9", "identity_key": "abc123"}],
-            cfg=_cfg(link_on_identity_key=False))
-        self.assertEqual(updated, [])
-        self.assertEqual(len(new), 1)
+    def test_external_id_still_updates_even_with_linking_off(self):
+        """Turning off the heuristic must not affect the source's own identifier."""
+        existing = self._existing(external_id="zispis:1", identity_key="abc123")
+        updated, new = self._split([{"external_id": "zispis:1", "identity_key": "abc123"}])
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(str(updated[0]["ID"]), str(existing.id))
 
     # ----------------------------------------------------------- national id
 
