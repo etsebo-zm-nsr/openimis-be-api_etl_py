@@ -6,13 +6,20 @@
 Nothing imports until this tree exists: openIMIS resolves a person's location by joining
 tblLocations on name AND code with the leaf type, so an empty tree rejects every row.
 
-`Location.code` is the DOTTED PATH of codes from the top (`9.903.130.9`). Gazetteer codes
-are normally parent-scoped rather than national - Zambia's file has 180 distinct
-`ward_code` values for ~1,770 wards - so a bare code identifies nothing and the path is
-what makes a node unique.
+`Location.code` is the PATH of codes from the top, because gazetteer codes are normally
+parent-scoped rather than national - Zambia's file has 180 distinct `ward_code` values
+for ~1,770 wards - so a bare code identifies nothing and the path is what makes a node
+unique.
 
---levels maps CSV columns onto openIMIS's four tiers, as `TYPE:code_column:name_column`,
-outermost first. The default is Zambia's GEO file; any other gazetteer is a flag change.
+--levels maps CSV columns onto openIMIS's four tiers, outermost first, as
+`TYPE:code_column:name_column[:width]`. Give no widths and the path is dot-separated
+(`9.903.130.9`). Give a width on every level and codes are zero-padded to it and
+concatenated with no separator (`0909031300009`), which is what downstream systems
+usually want. Either way a child's code begins with its parent's, so a prefix match
+finds a subtree.
+
+A width too small for the data is refused rather than truncated: silently dropping a
+digit would shift every code after it and map people to the wrong place.
 
 Idempotent: a node already present with the same path keeps its identity, so re-running
 after a corrected export updates names rather than duplicating the tree.
@@ -28,6 +35,12 @@ from api_etl.locations import normalise_place
 DEFAULT_LEVELS = "R:province_code:province,D:district_code:district," \
                  "W:constituency_code:constituency,V:ward_code:ward"
 
+# Widths measured on Zambia's GEO file: province 1-10, district 1-9071,
+# constituency 1-406, ward 1-820. Passed as
+#   --levels R:province_code:province:2,D:district_code:district:4,...
+ZM_FIXED_WIDTH_LEVELS = "R:province_code:province:2,D:district_code:district:4," \
+                        "W:constituency_code:constituency:3,V:ward_code:ward:3"
+
 
 class Command(BaseCommand):
     help = "Load a location hierarchy from a gazetteer CSV into tblLocations."
@@ -41,12 +54,19 @@ class Command(BaseCommand):
         parser.add_argument("--encoding", default="utf-8-sig")
 
     def handle(self, *args, **options):
-        levels = []
+        levels, widths = [], []
         for part in options["levels"].split(","):
             bits = part.split(":")
-            if len(bits) != 3:
-                raise CommandError(f"--levels entry {part!r} is not TYPE:code_col:name_col")
-            levels.append(tuple(bits))
+            if len(bits) not in (3, 4):
+                raise CommandError(
+                    f"--levels entry {part!r} is not TYPE:code_col:name_col[:width]")
+            levels.append(tuple(bits[:3]))
+            widths.append(int(bits[3]) if len(bits) == 4 else None)
+        if any(w is not None for w in widths) and any(w is None for w in widths):
+            raise CommandError(
+                "give a width on every level or on none: a partly padded code cannot be "
+                "split back into its levels unambiguously")
+        self.widths = widths if widths[0] is not None else None
 
         try:
             with open(options["csv_path"], encoding=options["encoding"]) as handle:
@@ -117,14 +137,28 @@ class Command(BaseCommand):
         seen = defaultdict(set)
         for row in rows:
             codes = []
-            for _, code_col, _ in levels:
+            for _, code_col, name_col in levels:
                 codes.append((row.get(code_col) or "").strip())
-                seen[len(codes)].add(".".join(codes))
+                seen[len(codes)].add(self._path(codes, name_col))
         self.stdout.write("\nwould ensure:")
         for depth, (type_, _, name_col) in enumerate(levels, start=1):
             existing = Location.objects.filter(type=type_, validity_to__isnull=True).count()
             self.stdout.write(f"  {type_} ({name_col:13}): {len(seen[depth]):5} node(s)"
                               f"   [{existing} currently in the database]")
+
+    def _path(self, codes, level_label=""):
+        """Join codes into the node's identifier: dotted, or zero-padded fixed width."""
+        if self.widths is None:
+            return ".".join(codes)
+        out = []
+        for code, width in zip(codes, self.widths):
+            if len(code) > width:
+                raise CommandError(
+                    f"code {code!r} at level {level_label!r} is {len(code)} digits but "
+                    f"the declared width is {width}. Widen it - truncating would shift "
+                    f"every following level and place people in the wrong location.")
+            out.append(code.zfill(width))
+        return "".join(out)
 
     # ------------------------------------------------------------------- load
 
@@ -144,7 +178,7 @@ class Command(BaseCommand):
                     parent = None
                     break
                 codes.append(code)
-                path = ".".join(codes)
+                path = self._path(codes, name_col)
                 if len(path) > 50:
                     raise CommandError(
                         f"code path {path!r} exceeds the 50-character column limit")

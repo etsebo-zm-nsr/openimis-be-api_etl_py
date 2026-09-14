@@ -125,3 +125,56 @@ class AdapterLocationResolutionTestCase(TestCase):
         out = adapter.transform([self.ROW])
         self.assertNotIn("location_code", out[0])
         self.assertEqual(adapter.unresolved_locations, [])
+
+
+class CodePathFormatTestCase(TestCase):
+    """Dotted vs fixed-width codes.
+
+    Gazetteer codes are parent-scoped, so a node's identifier is the path from the top.
+    Fixed width is what downstream systems usually want; the risk is that a code too
+    long for its field shifts every level after it, which must fail loudly.
+    """
+
+    def _command(self, levels):
+        from django.core.management import load_command_class
+        cmd = load_command_class("api_etl", "etl_load_locations")
+        cmd.widths = None
+        parts = [p.split(":") for p in levels.split(",")]
+        if all(len(p) == 4 for p in parts):
+            cmd.widths = [int(p[3]) for p in parts]
+        return cmd
+
+    ZM = "R:province_code:province:2,D:district_code:district:4," \
+         "W:constituency_code:constituency:3,V:ward_code:ward:3"
+
+    def test_dotted_is_the_default(self):
+        cmd = self._command("R:a:b,D:c:d")
+        self.assertEqual(cmd._path(["9", "903"]), "9.903")
+
+    def test_fixed_width_pads_and_concatenates(self):
+        cmd = self._command(self.ZM)
+        self.assertEqual(cmd._path(["9", "903", "130", "9"]), "090903130009")
+
+    def test_fixed_width_length_is_the_sum_of_widths(self):
+        cmd = self._command(self.ZM)
+        self.assertEqual(len(cmd._path(["9", "903", "130", "9"])), 2 + 4 + 3 + 3)
+
+    def test_a_childs_code_begins_with_its_parents(self):
+        """So a prefix match finds a subtree, under either format."""
+        cmd = self._command(self.ZM)
+        parent = cmd._path(["9", "903", "130"])
+        child = cmd._path(["9", "903", "130", "9"])
+        self.assertTrue(child.startswith(parent))
+
+    def test_distinct_paths_stay_distinct_when_padded(self):
+        cmd = self._command(self.ZM)
+        self.assertNotEqual(cmd._path(["9", "903", "13", "9"]),
+                            cmd._path(["9", "903", "130", "9"]))
+
+    def test_overlong_code_is_refused_not_truncated(self):
+        """Truncating would shift every following level and relocate people."""
+        from django.core.management.base import CommandError
+        cmd = self._command(self.ZM)
+        with self.assertRaises(CommandError) as ctx:
+            cmd._path(["9", "12345"], "district")
+        self.assertIn("width", str(ctx.exception))
