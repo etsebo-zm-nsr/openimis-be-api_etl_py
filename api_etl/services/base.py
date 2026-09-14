@@ -75,4 +75,9 @@ class ETLService(metaclass=abc.ABCMeta):
             # Reported rather than merely logged: they were pulled but are NOT in the
             # registry, and nothing else in the run's numbers would reveal the gap.
             "records_skipped": len(getattr(getattr(self, "adapter", None), "skipped", ())),
+            # Rows whose place names did not match the loaded location tree. They are
+            # pulled and staged but `individual` rejects them, so without this the loss
+            # is only visible by reading the upload's per-row validation errors.
+            "locations_unresolved": len(
+                getattr(getattr(self, "adapter", None), "unresolved_locations", ())),
         }

@@ -181,6 +181,19 @@ class AdapterConfig:
     # row. Configurable because a source's own filters may be unusable - ZISPIS accepts
     # unknown filter keys and silently ignores them, so filtering has to happen here.
     include_when: Dict[str, List[Any]] = field(default_factory=dict)
+    # Output columns holding the place names to resolve against the loaded location
+    # tree, outermost first - e.g. ["district", "constituency", "ward"]. Empty disables
+    # resolution and leaves whatever `field_map` produced.
+    #
+    # The source's TOP level is deliberately omitted: a district name implies its
+    # province (measured on Zambia's gazetteer: 116 district names, none spanning two
+    # provinces), so matching from district down gives the same answer while ignoring a
+    # source that still holds the old province after a boundary change - the single
+    # largest group of mismatches observed.
+    location_match_fields: List[str] = field(default_factory=list)
+    # {level: {source spelling: gazetteer spelling}} applied before matching, for
+    # spellings a source will not fix. Matched on the normalised source spelling.
+    location_aliases: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -290,7 +303,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
         "extra_columns": [], "required_fields": ["first_name", "last_name", "dob"],
         "identity_key_fields": ["first_name", "last_name", "year_of_birth", "sex", "district"],
-        "include_when": {},
+        "include_when": {}, "location_match_fields": [], "location_aliases": {},
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,

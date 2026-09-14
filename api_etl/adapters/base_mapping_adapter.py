@@ -26,6 +26,7 @@ from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
 from api_etl.adapters.base import DataAdapter
+from api_etl.locations import LocationIndex, apply_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,10 @@ class BaseMappingAdapter(DataAdapter):
         self.skipped: list = []
         # Rows excluded by `adapter.include_when` - a deliberate filter, not a fault.
         self.filtered: int = 0
+        # external_ids whose place names did not match the loaded location tree.
+        self.unresolved_locations: list = []
+        match_fields = self.cfg.adapter.location_match_fields or []
+        self._locations = LocationIndex(depth=len(match_fields)) if match_fields else None
 
     # ---------------------------------------------------------------- helpers
 
@@ -174,10 +179,17 @@ class BaseMappingAdapter(DataAdapter):
             if not self.keep_row(record):
                 self.filtered += 1
                 continue
+            self.resolve_location(record)
             key = self.identity_key(record)
             if key:
                 record["identity_key"] = key
             out.append(record)
+        if self.unresolved_locations:
+            logger.warning(
+                "api_etl[%s]: %s row(s) did not match the loaded location tree and will "
+                "be rejected by validation. First few: %s", self.cfg.name,
+                len(self.unresolved_locations),
+                ", ".join(path for _, path in self.unresolved_locations[:5]))
         if self.skipped:
             by_field: dict = {}
             for _, fields in self.skipped:
@@ -237,6 +249,33 @@ class BaseMappingAdapter(DataAdapter):
             if record.get(column) not in list(allowed or []):
                 return False
         return True
+
+    def resolve_location(self, record: dict) -> None:
+        """Replace the mapped place names with the loaded tree's code and canonical name.
+
+        openIMIS matches a person's location on name AND code together, so both have to
+        come from the same place - the tree that was loaded - rather than one from the
+        source and one derived. A source that sends names only therefore cannot supply
+        `location_code` itself; it is looked up here.
+
+        A row that does not resolve keeps its mapped values and is counted. It will be
+        rejected by `individual`'s own location validation, which is the right outcome:
+        a person placed in the wrong village is worse than a person rejected for review.
+        """
+        adapter = self.cfg.adapter
+        if not self._locations:
+            return
+        levels = adapter.location_match_fields
+        names = apply_aliases([record.get(level) for level in levels],
+                              adapter.location_aliases, levels)
+        resolved = self._locations.resolve(names)
+        if resolved is None:
+            self.unresolved_locations.append(
+                (record.get("external_id"), "/".join(str(n or "?") for n in names)))
+            return
+        code, canonical = resolved
+        record["location_code"] = code
+        record["location_name"] = canonical
 
     def missing_required(self, record: dict) -> list:
         """Required columns this record cannot supply.
