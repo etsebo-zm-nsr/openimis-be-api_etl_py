@@ -9,7 +9,7 @@ from django.test import TestCase
 
 from api_etl.config import build_source_config
 from api_etl.adapters.base_mapping_adapter import BaseMappingAdapter
-from api_etl.locations import LocationIndex, apply_aliases, normalise_place
+from api_etl.locations import LocationIndex, apply_aliases, normalise_place, place_key
 from location.models import Location
 
 
@@ -37,6 +37,32 @@ class NormalisePlaceTestCase(TestCase):
         self.assertIsNone(normalise_place(None))
 
 
+class PlaceKeyTestCase(TestCase):
+    """Space-insensitive matching. `normalise_place` maps every non-alphanumeric to a
+    space, so ZISPIS and the GEO file disagree on where an apostrophe (or hyphen) landed
+    and never produce the same string. `place_key` must agree regardless.
+
+    Measured: 1,356 records unresolved for this reason alone.
+    """
+
+    def test_apostrophe_pairs_converge(self):
+        pairs = [
+            ("SHIWANGA'NDU", "SHIWANGANDU"),
+            ("MNGO'MBA", "MNG OMBA"),
+            ("CHING'OMBE", "CHINGOMBE"),
+            ("NG'UNYAMA", "NGUNYAMA"),
+        ]
+        for zispis, geo in pairs:
+            self.assertEqual(place_key(zispis), place_key(geo), f"{zispis!r} vs {geo!r}")
+
+    def test_genuinely_different_names_stay_different(self):
+        self.assertNotEqual(place_key("MWICHE"), place_key("MWICHENE"))
+
+    def test_empty_is_none(self):
+        self.assertIsNone(place_key(""))
+        self.assertIsNone(place_key(None))
+
+
 class LocationIndexTestCase(TestCase):
 
     def setUp(self):
@@ -49,6 +75,17 @@ class LocationIndexTestCase(TestCase):
 
     def test_resolution_is_spelling_tolerant(self):
         self.assertIsNotNone(self.index.resolve(["itezhi tezhi", "ITEZHI-TEZHI", " masemu "]))
+
+    def test_resolution_is_space_insensitive(self):
+        """The property place_key exists for: an apostrophe folded to a space on one
+        side and dropped on the other must still resolve to the same node."""
+        r = Location(code="10", type="R", name="MUCHINGA"); r.save()
+        d = Location(code="10.1", type="D", name="SHIWANGANDU", parent=r); d.save()
+        c = Location(code="10.1.1", type="W", name="MPIKA", parent=d); c.save()
+        v = Location(code="10.1.1.1", type="V", name="MNGOMBA", parent=c); v.save()
+        index = LocationIndex(depth=3)
+        self.assertEqual(index.resolve(["SHIWANGA'NDU", "MPIKA", "MNGO'MBA"]),
+                         ("10.1.1.1", "MNGOMBA"))
 
     def test_unknown_path_is_none(self):
         self.assertIsNone(self.index.resolve(["ITEZHI-TEZHI", "ITEZHI-TEZHI", "NOWHERE"]))
@@ -85,6 +122,14 @@ class AliasTestCase(TestCase):
     def test_no_aliases_is_a_passthrough(self):
         names = ["A", "B", "C"]
         self.assertEqual(apply_aliases(names, {}, ["district", "constituency", "ward"]), names)
+
+    def test_alias_lookup_is_space_insensitive(self):
+        """An alias keyed on the GEO spelling must still match ZISPIS's apostrophe
+        variant, and vice versa."""
+        out = apply_aliases(["SHIWANGA'NDU", "X", "Y"],
+                            {"district": {"SHIWANGANDU": "SHIWANGA NDU (CANONICAL)"}},
+                            ["district", "constituency", "ward"])
+        self.assertEqual(out[0], "SHIWANGA NDU (CANONICAL)")
 
 
 class AdapterLocationResolutionTestCase(TestCase):
@@ -125,6 +170,55 @@ class AdapterLocationResolutionTestCase(TestCase):
         out = adapter.transform([self.ROW])
         self.assertNotIn("location_code", out[0])
         self.assertEqual(adapter.unresolved_locations, [])
+
+    def test_unresolved_row_still_carries_a_location_code_key(self):
+        """A record that fails to resolve must still carry the column (as None), or a
+        batch where EVERY row fails to resolve has no location_code column at all -
+        openIMIS then rejects the whole upload for a missing header instead of the rows
+        individually."""
+        out = self._adapter().transform([dict(self.ROW, w="NOWHERE")])
+        self.assertIn("location_code", out[0])
+        self.assertIsNone(out[0]["location_code"])
+
+    def test_a_batch_where_nothing_resolves_still_produces_a_location_code_header(self):
+        """End-to-end through data_to_file, which is what openIMIS actually reads."""
+        from api_etl.utils import data_to_file
+        adapter = self._adapter()
+        out = adapter.transform([dict(self.ROW, w="NOWHERE"),
+                                 dict(self.ROW, id="2", w="ALSO NOWHERE")])
+        self.assertEqual(len(adapter.unresolved_locations), 2)
+        file = data_to_file(out, "batch")
+        file.file.seek(0)
+        header = file.file.read().decode("utf-8").splitlines()[0]
+        self.assertIn("location_code", header.split(","))
+
+
+class LoaderCheckTestCase(TestCase):
+    """`etl_load_locations`'s internal uniqueness check, now on `place_key` rather than
+    `normalise_place` - see api_etl.locations.place_key."""
+
+    def _command(self):
+        from django.core.management import load_command_class
+        cmd = load_command_class("api_etl", "etl_load_locations")
+        cmd.widths = None
+        return cmd
+
+    LEVELS = [("R", "code", "name")]
+
+    def test_apostrophe_spelling_of_the_same_place_is_not_a_false_clash(self):
+        rows = [{"code": "1", "name": "SHIWANGA'NDU"}, {"code": "1", "name": "SHIWANGANDU"}]
+        self.assertEqual(self._command()._check(rows, self.LEVELS), 0)
+
+    def test_two_codes_colliding_only_once_spaces_are_ignored_are_flagged(self):
+        """A name clash that only exists under space-insensitive matching must still be
+        caught - this is exactly what the mandatory --dry-run re-check against the real
+        GEO file guards against."""
+        rows = [{"code": "1", "name": "MWICHE"}, {"code": "2", "name": "MWICH E"}]
+        self.assertGreater(self._command()._check(rows, self.LEVELS), 0)
+
+    def test_genuinely_distinct_names_are_not_flagged(self):
+        rows = [{"code": "1", "name": "MWICHE"}, {"code": "2", "name": "MWICHENE"}]
+        self.assertEqual(self._command()._check(rows, self.LEVELS), 0)
 
 
 class CodePathFormatTestCase(TestCase):

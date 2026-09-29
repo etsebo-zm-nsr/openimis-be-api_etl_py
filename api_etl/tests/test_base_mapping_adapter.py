@@ -363,6 +363,25 @@ class RequiredFieldsTestCase(TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(adapter.skipped, [])
 
+    def test_na_like_names_are_held_back_not_imported(self):
+        """'n/a' passes a naive emptiness check, then pandas reads it back as NaN and
+        the NOT NULL constraint aborts the whole batch. Measured: 2 people named 'n/a'
+        lost 393 people in one run."""
+        for token in ("n/a", "NA", "null"):
+            adapter = self._adapter()
+            out = adapter.transform([{"id": "1", "fn": token, "ln": "Banda", "d": "1990-01-01"}])
+            self.assertEqual(out, [], f"{token!r} should be held back")
+            self.assertEqual(adapter.skipped, [("1", ["first_name"])], token)
+
+    def test_plausible_names_that_merely_resemble_an_na_token_survive(self):
+        """pandas' na_values match is case-sensitive - 'Nan' and 'Nana' are real names,
+        distinct from the literal tokens 'NaN'/'nan'."""
+        for name in ("Nan", "Nana"):
+            adapter = self._adapter()
+            out = adapter.transform([{"id": "1", "fn": name, "ln": "Banda", "d": "1990-01-01"}])
+            self.assertEqual([r["first_name"] for r in out], [name])
+            self.assertEqual(adapter.skipped, [])
+
 
 class IdentityKeyTestCase(TestCase):
     """The identity key replaces national id as the linkage signal.
