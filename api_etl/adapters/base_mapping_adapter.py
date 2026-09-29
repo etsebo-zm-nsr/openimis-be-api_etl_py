@@ -36,6 +36,17 @@ MAGIC_COLUMNS = ("recipient_info", "group_code", "individual_role")
 RECIPIENT_PRIMARY = "1"
 RECIPIENT_SECONDARY = "2"
 
+# pandas.read_csv's default `na_values` (see the pandas docs for `read_csv`) - the exact,
+# case-sensitive tokens that become NaN when openIMIS re-reads our CSV. A name of "n/a"
+# passes an emptiness check here, then becomes NaN there and aborts the whole batch on
+# the NOT NULL constraint. Checking against this set here, before the CSV round-trip,
+# catches it while there is still a chance to hold the record back individually.
+PANDAS_DEFAULT_NA_VALUES = frozenset({
+    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
+    "1.#IND", "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a",
+    "nan", "null",
+})
+
 
 class BaseMappingAdapter(DataAdapter):
 
@@ -261,6 +272,13 @@ class BaseMappingAdapter(DataAdapter):
         A row that does not resolve keeps its mapped values and is counted. It will be
         rejected by `individual`'s own location validation, which is the right outcome:
         a person placed in the wrong village is worse than a person rejected for review.
+
+        An unresolved row still gets a `location_code` key, set to None. Without it, a
+        batch where EVERY row fails to resolve produces a CSV with no location_code
+        column at all - `union_of_keys` only emits columns some row actually carries -
+        and openIMIS rejects the whole upload with "missing essential header:
+        location_code" instead of rejecting the rows individually, as a partly-resolved
+        batch does.
         """
         adapter = self.cfg.adapter
         if not self._locations:
@@ -272,6 +290,7 @@ class BaseMappingAdapter(DataAdapter):
         if resolved is None:
             self.unresolved_locations.append(
                 (record.get("external_id"), "/".join(str(n or "?") for n in names)))
+            record["location_code"] = None
             return
         code, canonical = resolved
         record["location_code"] = code
@@ -284,9 +303,22 @@ class BaseMappingAdapter(DataAdapter):
         `INSERT ... SELECT`: a single row with a null `dob` aborts the whole statement,
         so 7 incomplete records out of 200 reject the other 193. Holding them back is
         not a silent drop - they are counted, logged and reported on the run.
+
+        A non-empty value is not enough: `data_to_file` writes a plain CSV, and
+        `IndividualImportService.import_loaders` reads it back with
+        `pd.read_csv(f, dtype={"location_code": str})` - every OTHER column is subject
+        to pandas' default NA-token detection. A first_name of "n/a" passes the naive
+        emptiness check, survives to the CSV, and comes back as NaN - the same NOT NULL
+        abort as a value that was missing here. So a value is treated as missing exactly
+        when pandas would later read it as NaN.
         """
-        return [name for name in (self.cfg.adapter.required_fields or [])
-                if record.get(name) in (None, "")]
+        missing = []
+        for name in (self.cfg.adapter.required_fields or []):
+            value = record.get(name)
+            text = "" if value is None else str(value).strip()
+            if text in PANDAS_DEFAULT_NA_VALUES:
+                missing.append(name)
+        return missing
 
     def transform_row(self, row: Any) -> Optional[dict]:
         adapter = self.cfg.adapter

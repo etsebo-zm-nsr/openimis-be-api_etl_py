@@ -35,6 +35,21 @@ def normalise_place(value) -> Optional[str]:
     return " ".join(re.sub(r"[^A-Z0-9]+", " ", text).split()) or None
 
 
+def place_key(value) -> Optional[str]:
+    """`normalise_place`, with the spaces removed too - for MATCHING only, never display.
+
+    Every non-alphanumeric character folds to a space, so where an apostrophe (or a
+    hyphen, or any other punctuation) LANDS still matters: ZISPIS's `SHIWANGA'NDU`
+    normalises to "SHIWANGA NDU", the GEO file's own `SHIWANGANDU` to itself - never the
+    same string, even though they name the same place (measured: 1,356 records
+    unresolved for this reason alone - `MNGO'MBA` vs `MNG OMBA`, `CHING'OMBE` vs
+    `CHINGOMBE`, `NG'UNYAMA` vs `NGUNYAMA`). Stripping spaces after normalising makes the
+    comparison immune to where the punctuation fell.
+    """
+    key = normalise_place(value)
+    return key.replace(" ", "") if key is not None else None
+
+
 class LocationIndex:
     """Lookup from a tuple of place names to a loaded location's code.
 
@@ -59,7 +74,7 @@ class LocationIndex:
         for leaf in rows:
             chain, node = [], leaf
             while node is not None and len(chain) < self.depth:
-                chain.append(normalise_place(node.name))
+                chain.append(place_key(node.name))
                 node = node.parent
             if len(chain) < self.depth or any(part is None for part in chain):
                 continue
@@ -89,7 +104,7 @@ class LocationIndex:
 
     def resolve(self, names: Sequence) -> Optional[Tuple[str, str]]:
         """(code, canonical_name) for this name path, or None."""
-        key = tuple(normalise_place(part) for part in names)
+        key = tuple(place_key(part) for part in names)
         if any(part is None for part in key):
             return None
         return self.index.get(key)
@@ -110,7 +125,7 @@ def apply_aliases(names: Sequence, aliases: Optional[Dict[str, Dict[str, str]]],
     out = []
     for level, value in zip(levels, names):
         table = aliases.get(level) or {}
-        lookup = {normalise_place(k): v for k, v in table.items()}
-        replacement = lookup.get(normalise_place(value))
+        lookup = {place_key(k): v for k, v in table.items()}
+        replacement = lookup.get(place_key(value))
         out.append(replacement if replacement is not None else value)
     return out
