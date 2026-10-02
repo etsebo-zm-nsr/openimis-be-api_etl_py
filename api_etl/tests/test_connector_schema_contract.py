@@ -60,9 +60,11 @@ def _emitted_columns(config):
     if adapter.group_code_field:
         emitted |= {GROUP_AGGREGATION_COLUMN, "household_ref", "individual_role"}
         if adapter.recipient_field:
-            emitted.add("recipient_info")
+            emitted |= {"recipient_info", "household_recipient"}
     if config.provenance.data_source_label:
         emitted.add("beneficiary_data_source")
+    # Quality flags, written only on rows that have a problem.
+    emitted |= {"text_quality", "name_quality"}
     return emitted
 
 

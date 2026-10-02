@@ -47,6 +47,12 @@ PANDAS_DEFAULT_NA_VALUES = frozenset({
     "nan", "null",
 })
 
+# Name values that are placeholders rather than names. Flagged, never altered or dropped.
+NAME_PLACEHOLDERS = frozenset({
+    "UNKNOWN", "NONE", "NIL", "NULL", "TEST", "XXX", "NO NAME", "NONAME", "-", ".",
+})
+_NRC_PATTERN = re.compile(r"\d{6}\s*/\s*\d{2}\s*/\s*\d")
+
 
 class BaseMappingAdapter(DataAdapter):
 
@@ -96,6 +102,22 @@ class BaseMappingAdapter(DataAdapter):
         cleaned = "".join(ch for ch in text if ch.isalnum())
         return cleaned.upper() or None
 
+    def clean_text_reporting(self, value: Any):
+        """Return `(cleaned, removed)`; `removed` is True when characters were dropped.
+
+        Whitespace is collapsed (so `\\n` and `\\t` become spaces, not removals). What is
+        REMOVED is any remaining control character (category Cc) and lone surrogate
+        (Cs, which PostgreSQL rejects). Text is NFC-normalised first so a decomposed
+        N + combining tilde equals the precomposed letter for linkage and search. Valid
+        Unicode letters are never altered beyond that.
+        """
+        if not isinstance(value, str) or not self.cfg.adapter.clean_whitespace:
+            return value, False
+        text = " ".join(unicodedata.normalize("NFC", value).split())
+        kept = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cs"))
+        removed = kept != text
+        return (" ".join(kept.split()) or None), removed
+
     def clean_text(self, value: Any) -> Any:
         """Collapse whitespace and drop control characters from a string value.
 
@@ -104,9 +126,31 @@ class BaseMappingAdapter(DataAdapter):
         record linkage confirms a national-ID match on surname, and `'\\nKaboyi'` never
         equals `'Kaboyi'`. Non-strings pass through untouched.
         """
-        if not isinstance(value, str) or not self.cfg.adapter.clean_whitespace:
-            return value
-        return " ".join(value.split()) or None
+        return self.clean_text_reporting(value)[0]
+
+    def name_problems(self, record: dict) -> list:
+        """Quality problem codes for the configured name fields. Values are not changed."""
+        fields = list(self.cfg.adapter.name_fields or [])
+        codes = []
+        for name in fields:
+            value = record.get(name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            text = value.strip()
+            if any(ch.isdigit() for ch in text):
+                codes.append("contains_digits")
+            if _NRC_PATTERN.search(text):
+                codes.append("looks_like_nrc")
+            if text.upper() in NAME_PLACEHOLDERS:
+                codes.append("placeholder")
+            if len(text) == 1:
+                codes.append("single_character")
+        if "first_name" in fields and "last_name" in fields:
+            first, last = record.get("first_name"), record.get("last_name")
+            if (isinstance(first, str) and isinstance(last, str) and first.strip()
+                    and first.strip().casefold() == last.strip().casefold()):
+                codes.append("first_equals_last")
+        return sorted(set(codes))
 
     def _plausible(self, parsed: datetime) -> bool:
         """Reject dates that are data-entry artefacts rather than dates.
@@ -324,8 +368,11 @@ class BaseMappingAdapter(DataAdapter):
         adapter = self.cfg.adapter
         record: dict = {}
 
+        stripped = []
         for target, path in (adapter.field_map or {}).items():
-            record[target] = self.clean_text(self.resolve_path(row, path))
+            record[target], removed = self.clean_text_reporting(self.resolve_path(row, path))
+            if removed:
+                stripped.append(target)
         for target, value in (adapter.constants or {}).items():
             record[target] = value
 
@@ -337,6 +384,14 @@ class BaseMappingAdapter(DataAdapter):
                            self.cfg.name, adapter.external_id_field)
             return None
         record["external_id"] = external_id
+
+        # Flag, never block: values are stored as the source sent them (minus unstorable
+        # characters) and the problem is recorded in json_ext for users to filter on.
+        if stripped:
+            record["text_quality"] = "invalid_characters_removed:" + ",".join(sorted(stripped))
+        problems = self.name_problems(record)
+        if problems:
+            record["name_quality"] = ";".join(problems)
 
         if "dob" in record:
             record["dob"] = self.parse_date(record.get("dob"))
@@ -372,6 +427,9 @@ class BaseMappingAdapter(DataAdapter):
                     record["recipient_info"] = self.map_recipient(
                         self.resolve_path(row, adapter.recipient_field)
                     )
+                    # Durable copy: upstream strips `recipient_info` after grouping, and
+                    # a later post-import step needs to know the source declared it.
+                    record["household_recipient"] = record["recipient_info"]
             else:
                 logger.warning(
                     "api_etl[%s]: row %s has no group code - it will import as an individual "

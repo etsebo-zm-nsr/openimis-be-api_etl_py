@@ -483,3 +483,88 @@ class IncludeWhenTestCase(TestCase):
         adapter.transform(self.ROWS)
         self.assertEqual(adapter.skipped, [])
         self.assertEqual(adapter.filtered, 2)
+
+
+class TextCleaningAndQualityTestCase(TestCase):
+    """Flag, never block: values are stored as sent and problems are flagged in json_ext."""
+
+    def _row(self, **adapter_cfg):
+        cfg = {"field_map": {"first_name": "fn", "last_name": "ln"}, "external_id_field": "id"}
+        cfg.update(adapter_cfg)
+        return _adapter(**cfg)
+
+    def test_nfc_and_nfd_are_equal(self):
+        a = _adapter()
+        self.assertEqual(a.clean_text("N\u0303ongolo"), "\u00d1ongolo")
+        self.assertEqual(a.clean_text("N\u0303ongolo"), a.clean_text("\u00d1ongolo"))
+
+    def test_control_character_removed_and_flagged(self):
+        adapter = self._row()
+        record = adapter.transform_row({"id": 1, "fn": "Chanda", "ln": "NG\u00c2\x87NDU"})
+        self.assertEqual(record["last_name"], "NG\u00c2NDU")
+        self.assertEqual(record["text_quality"], "invalid_characters_removed:last_name")
+
+    def test_lone_surrogate_removed_and_flagged(self):
+        adapter = self._row()
+        record = adapter.transform_row({"id": 1, "fn": "Ban\ud800da", "ln": "Phiri"})
+        self.assertEqual(record["first_name"], "Banda")
+        self.assertEqual(record["text_quality"], "invalid_characters_removed:first_name")
+
+    def test_multiple_removed_fields_are_sorted(self):
+        record = self._row().transform_row({"id": 1, "fn": "A\x87b", "ln": "C\x87d"})
+        self.assertEqual(record["text_quality"],
+                         "invalid_characters_removed:first_name,last_name")
+
+    def test_whitespace_controls_are_not_removals(self):
+        record = self._row().transform_row({"id": 1, "fn": "\nChanda\t", "ln": "Ban\nda"})
+        self.assertEqual(record["first_name"], "Chanda")
+        self.assertNotIn("text_quality", record)
+
+    def test_unicode_names_untouched_and_unflagged(self):
+        for first, last in (("\u00d1ongolo", "Mwanz\u00e0"), ("Sa\u0155ah", "Waku\u00f1guma"),
+                            ("\u014boma", "Phiri")):
+            record = self._row().transform_row({"id": 1, "fn": first, "ln": last})
+            self.assertEqual((record["first_name"], record["last_name"]), (first, last))
+            self.assertNotIn("text_quality", record)
+            self.assertNotIn("name_quality", record)
+
+    def _quality(self, first, last, **cfg):
+        record = self._row(**cfg).transform_row({"id": 1, "fn": first, "ln": last})
+        return record.get("name_quality"), record
+
+    def test_each_name_quality_code(self):
+        self.assertEqual(self._quality("Chanda2", "Banda")[0], "contains_digits")
+        self.assertEqual(self._quality("Chanda", "123456/78/1")[0],
+                         "contains_digits;looks_like_nrc")
+        self.assertEqual(self._quality("Chanda", "Unknown")[0], "placeholder")
+        self.assertEqual(self._quality("Chanda", "-")[0], "placeholder;single_character")
+        self.assertEqual(self._quality("C", "Banda")[0], "single_character")
+        self.assertEqual(self._quality("Banda", "BANDA")[0], "first_equals_last")
+
+    def test_nrc_with_spaces_is_detected(self):
+        self.assertIn("looks_like_nrc", self._quality("Chanda", "123456 / 78 / 1")[0])
+
+    def test_multiple_codes_joined_sorted_and_values_unchanged(self):
+        flag, record = self._quality("X", "x")
+        self.assertEqual(flag, "first_equals_last;single_character")
+        self.assertEqual((record["first_name"], record["last_name"]), ("X", "x"))
+
+    def test_clean_record_has_no_quality_keys(self):
+        record = self._row().transform_row({"id": 1, "fn": "Chanda", "ln": "Banda"})
+        self.assertNotIn("name_quality", record)
+        self.assertNotIn("text_quality", record)
+
+    def test_name_fields_configurable(self):
+        flag, _ = self._quality("Chanda2", "Banda", name_fields=["last_name"])
+        self.assertIsNone(flag)
+        flag, _ = self._quality("Chanda", "Banda9", name_fields=["last_name"])
+        self.assertEqual(flag, "contains_digits")
+        flag, _ = self._quality("Banda", "Banda", name_fields=["first_name"])
+        self.assertIsNone(flag)
+
+    def test_household_recipient_copied(self):
+        adapter = _adapter(field_map={}, external_id_field="id", group_code_field="hh",
+                           recipient_field="rcp")
+        record = adapter.transform_row({"id": 1, "hh": "H1", "rcp": "1"})
+        self.assertEqual(record["household_recipient"], record["recipient_info"])
+        self.assertEqual(record["household_recipient"], "1")

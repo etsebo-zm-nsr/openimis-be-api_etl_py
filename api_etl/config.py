@@ -181,6 +181,9 @@ class AdapterConfig:
     # row. Configurable because a source's own filters may be unusable - ZISPIS accepts
     # unknown filter keys and silently ignores them, so filtering has to happen here.
     include_when: Dict[str, List[Any]] = field(default_factory=dict)
+    # Output columns checked for name-quality problems (digits, NRC-like text,
+    # placeholders, ...). Problems are flagged in `name_quality`; values are not changed.
+    name_fields: List[str] = field(default_factory=lambda: ["first_name", "last_name"])
     # Output columns holding the place names to resolve against the loaded location
     # tree, outermost first - e.g. ["district", "constituency", "ward"]. Empty disables
     # resolution and leaves whatever `field_map` produced.
@@ -303,6 +306,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
         "extra_columns": [], "required_fields": ["first_name", "last_name", "dob"],
         "identity_key_fields": ["first_name", "last_name", "year_of_birth", "sex", "district"],
+        "name_fields": ["first_name", "last_name"],
         "include_when": {}, "location_match_fields": [], "location_aliases": {},
     },
     "sink": {
