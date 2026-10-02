@@ -61,6 +61,9 @@ class BaseMappingAdapter(DataAdapter):
         self.cfg = cfg
         # (external_id, [missing field, ...]) for records held back this run.
         self.skipped: list = []
+        # (external_id, [missing field, ...], raw source row) for the same records, so the
+        # service can persist what was held back. `skipped` keeps its 2-tuple shape.
+        self.held_rows: list = []
         # Rows excluded by `adapter.include_when` - a deliberate filter, not a fault.
         self.filtered: int = 0
         # external_ids whose place names did not match the loaded location tree.
@@ -232,6 +235,7 @@ class BaseMappingAdapter(DataAdapter):
             missing = self.missing_required(record)
             if missing:
                 self.skipped.append((record.get("external_id"), missing))
+                self.held_rows.append((record.get("external_id"), missing, row))
                 continue
             if not self.keep_row(record):
                 self.filtered += 1
