@@ -35,6 +35,9 @@ LINKAGE_COLUMNS = {"alt_external_ids", "linkage_candidate_id", "linkage_note"}
 # linkage columns - they must be declared up front or the first bad row fails the batch.
 QUALITY_COLUMNS = {"text_quality", "name_quality"}
 
+# Written on every row of a connector that resolves locations (`location_match_fields`).
+LOCATION_COLUMNS = {"location_match", "source_location"}
+
 # The identity key the sink matches on, hashed from `adapter.identity_key_fields`.
 IDENTITY_COLUMN = "identity_key"
 
@@ -58,6 +61,8 @@ def emitted_columns(config):
         emitted.add("beneficiary_data_source")
     emitted |= set(adapter.extra_columns or ())
     emitted |= QUALITY_COLUMNS
+    if adapter.location_match_fields:
+        emitted |= LOCATION_COLUMNS
     if adapter.identity_key_fields:
         emitted.add("identity_key")
     if config.sink.link_on_identity_key or config.sink.flag_national_id_matches:

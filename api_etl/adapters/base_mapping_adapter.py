@@ -65,6 +65,8 @@ class BaseMappingAdapter(DataAdapter):
         self.filtered: int = 0
         # external_ids whose place names did not match the loaded location tree.
         self.unresolved_locations: list = []
+        # external_ids resolved only by the district+ward fallback (constituency ignored).
+        self.fallback_locations: list = []
         match_fields = self.cfg.adapter.location_match_fields or []
         self._locations = LocationIndex(depth=len(match_fields)) if match_fields else None
 
@@ -242,9 +244,15 @@ class BaseMappingAdapter(DataAdapter):
         if self.unresolved_locations:
             logger.warning(
                 "api_etl[%s]: %s row(s) did not match the loaded location tree and will "
-                "be rejected by validation. First few: %s", self.cfg.name,
+                "be imported WITHOUT a location, flagged. First few: %s", self.cfg.name,
                 len(self.unresolved_locations),
                 ", ".join(path for _, path in self.unresolved_locations[:5]))
+        if self.fallback_locations:
+            logger.warning(
+                "api_etl[%s]: %s row(s) matched on district and ward only (the "
+                "constituency disagrees with the loaded location tree). First few: %s",
+                self.cfg.name, len(self.fallback_locations),
+                ", ".join(path for _, path in self.fallback_locations[:5]))
         if self.skipped:
             by_field: dict = {}
             for _, fields in self.skipped:
@@ -313,28 +321,52 @@ class BaseMappingAdapter(DataAdapter):
         source and one derived. A source that sends names only therefore cannot supply
         `location_code` itself; it is looked up here.
 
-        A row that does not resolve keeps its mapped values and is counted. It will be
-        rejected by `individual`'s own location validation, which is the right outcome:
-        a person placed in the wrong village is worse than a person rejected for review.
+        Resolution tries the full path first. If that fails and there are at least two
+        levels, it retries on the first (district) and last (ward) level only, ignoring
+        the middle: the gazetteer is authoritative, and a source's constituency is the
+        level that most often disagrees. That resolves only if the ward is unique within
+        the district. Every record gets `location_match` ("exact", "district_ward" or
+        "unresolved"); the last two also get `source_location`, the place names as sent
+        ("district / constituency / ward", "?" for a missing level), for review.
 
-        An unresolved row still gets a `location_code` key, set to None. Without it, a
+        A row that resolves by neither route is imported WITHOUT a location, flagged
+        "unresolved". This supersedes the earlier "a person placed in the wrong village
+        is worse than a person rejected": the person now has NO location rather than a
+        wrong one, and is never held back. `individual`'s import validation accepts a
+        row whose `location_name` and `location_code` are both empty, but rejects one
+        with a name and no code - so BOTH are blanked, not just the code.
+
+        An unresolved row still gets a `location_code` key (None). Without it, a
         batch where EVERY row fails to resolve produces a CSV with no location_code
         column at all - `union_of_keys` only emits columns some row actually carries -
         and openIMIS rejects the whole upload with "missing essential header:
-        location_code" instead of rejecting the rows individually, as a partly-resolved
-        batch does.
+        location_code" instead of accepting the rows.
         """
         adapter = self.cfg.adapter
         if not self._locations:
             return
         levels = adapter.location_match_fields
+        sent = " / ".join(str(self.clean_text(record.get(level)) or "?") for level in levels)
         names = apply_aliases([record.get(level) for level in levels],
                               adapter.location_aliases, levels)
+        external_id = record.get("external_id")
         resolved = self._locations.resolve(names)
+        if resolved is not None:
+            record["location_match"] = "exact"
+        else:
+            resolved = self._locations.resolve_skipping_middle(names) \
+                if len(levels) >= 2 else None
+            if resolved is not None:
+                record["location_match"] = "district_ward"
+                record["source_location"] = sent
+                self.fallback_locations.append((external_id, sent))
         if resolved is None:
             self.unresolved_locations.append(
-                (record.get("external_id"), "/".join(str(n or "?") for n in names)))
+                (external_id, "/".join(str(n or "?") for n in names)))
+            record["location_match"] = "unresolved"
+            record["source_location"] = sent
             record["location_code"] = None
+            record["location_name"] = None
             return
         code, canonical = resolved
         record["location_code"] = code

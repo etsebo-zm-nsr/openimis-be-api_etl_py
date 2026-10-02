@@ -65,6 +65,8 @@ def _emitted_columns(config):
         emitted.add("beneficiary_data_source")
     # Quality flags, written only on rows that have a problem.
     emitted |= {"text_quality", "name_quality"}
+    if adapter.location_match_fields:
+        emitted |= {"location_match", "source_location"}
     return emitted
 
 
