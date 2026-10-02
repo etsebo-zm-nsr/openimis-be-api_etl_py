@@ -27,6 +27,7 @@ GROUP_AGGREGATION_COLUMN = None
 IDENTIFIER_COLUMNS = (
     "national_id", "national_id_type", "external_id", "source_batch_id",
     "group_code", "household_ref", "recipient_info", "individual_role",
+    "household_recipient",
 )
 
 
@@ -107,22 +108,60 @@ class IndividualImportSink(DataSink):
     # ---------------------------------------------------------------- push
 
     def push(self, data: list[dict], batch_identifier=None):
+        """Import the batch. Returns True if every import call reported success.
+
+        A batch with nothing to import, or whose existing records are skipped because
+        `update_existing` is off, counts as success. The result is per batch, not per
+        record: openIMIS reports one outcome for each of the new/update uploads.
+        """
         data = self._stamp_provenance(data, batch_identifier)
         existing_records, new_records = self._split_existing_and_new(data)
+        ok = True
 
         if new_records:
-            self._import_new_records(new_records, batch_identifier)
+            result = self._import_new_records(new_records, batch_identifier)
+            ok = ok and bool((result or {}).get("success"))
         else:
             logger.debug("No new record to import")
 
         if existing_records:
             if self.update_existing:
-                self._update_existing_records(existing_records, batch_identifier)
+                self._keep_existing_locations(existing_records)
+                result = self._update_existing_records(existing_records, batch_identifier)
+                ok = ok and bool((result or {}).get("success"))
             else:
                 logger.debug(f"Skipped updating {len(existing_records)} existing records due to "
                              f"sink.update_existing = False")
         else:
             logger.debug("No existing record to update")
+        return ok
+
+    def _keep_existing_locations(self, existing_records):
+        """Do not let an unresolved re-pull erase a location that is already set.
+
+        An unresolved row carries `location_code`/`location_name` of None. For a NEW
+        individual that is intended (imported without a location). For an EXISTING one,
+        openIMIS's update SQL sets `location_id` from a LEFT JOIN on name+code, so
+        None/None writes NULL and would wipe a location a data owner assigned by hand.
+        Such rows are given the individual's current village (type 'V' - the only type
+        the join matches) and `location_match = "unresolved_kept_existing"`;
+        `source_location` is left as sent. Individuals without a village are untouched.
+        """
+        unresolved = [r for r in existing_records
+                      if r.get("location_match") == "unresolved" and r.get("ID") is not None]
+        if not unresolved:
+            return
+        ids = {r["ID"] for r in unresolved}
+        current = {
+            pk: (code, name) for pk, code, name in Individual.objects.filter(
+                id__in=ids, location__isnull=False, location__type="V",
+            ).values_list("id", "location__code", "location__name")
+        }
+        for record in unresolved:
+            kept = current.get(record["ID"])
+            if kept:
+                record["location_code"], record["location_name"] = kept
+                record["location_match"] = "unresolved_kept_existing"
 
     def _stamp_provenance(self, data, batch_identifier):
         """Stamp the batch id on every record.

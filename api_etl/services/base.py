@@ -16,12 +16,14 @@ def sanitise_for_jsonb(value):
     """Make a source row storable in a PostgreSQL JSONB column.
 
     JSONB rejects lone surrogates (real data contains e.g. "\\ud819") and NaN/Infinity
-    (pandas-backed sources produce them), and the JSON encoder cannot serialise arbitrary
-    objects. Strings (keys and values) get surrogates replaced with U+FFFD, non-finite
-    floats become None and unknown types become their str().
+    (pandas-backed sources produce them), NUL (`\\u0000`), and the JSON encoder cannot
+    serialise arbitrary objects. Strings (keys and values) get surrogates replaced with
+    U+FFFD and NULs removed, non-finite floats become None and unknown types become
+    their str().
     """
     if isinstance(value, str):
-        return "".join("\ufffd" if "\ud800" <= ch <= "\udfff" else ch for ch in value)
+        return "".join("\ufffd" if "\ud800" <= ch <= "\udfff" else ch
+                       for ch in value if ch != "\x00")
     if isinstance(value, dict):
         return {sanitise_for_jsonb(str(k)): sanitise_for_jsonb(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
@@ -54,8 +56,10 @@ class ETLService(metaclass=abc.ABCMeta):
         try:
             for raw_batch, batch_identifier in self.source.pull():
                 transformed_batch = self.adapter.transform(raw_batch)
-                self.sink.push(transformed_batch, batch_identifier)
-                self._record_held_and_resolved(transformed_batch)
+                pushed = self.sink.push(transformed_batch, batch_identifier)
+                # A sink that reports nothing (None) is taken to have succeeded; only an
+                # explicit False means the batch did not import.
+                self._record_held_and_resolved(transformed_batch, pushed is not False)
                 self.records_pulled += len(raw_batch)
                 self.batches_pushed += 1
                 self.on_batch_complete(batch_identifier)
@@ -65,8 +69,13 @@ class ETLService(metaclass=abc.ABCMeta):
 
         return self._success_result()
 
-    def _record_held_and_resolved(self, transformed_batch):
+    def _record_held_and_resolved(self, transformed_batch, imported_ok=True):
         """Persist this batch's held-back records and resolve ones that now import.
+
+        "Resolved" means "imported in a successful batch": the sink reports one outcome
+        per batch, not per record, so when `imported_ok` is False nothing is resolved.
+        The held-row index only advances once the write has committed, so a failed
+        write is retried by the next batch's call instead of being lost.
 
         Never raises: a failure here must not abort a sync whose data has already been
         pushed. The held records are still counted in `records_skipped` either way.
@@ -81,7 +90,7 @@ class ETLService(metaclass=abc.ABCMeta):
 
         start = getattr(self, "_held_persisted", 0)
         new_rows = list(held_rows[start:])
-        self._held_persisted = len(held_rows)
+        end = len(held_rows)
         source = cfg.name
         now = timezone.now()
         try:
@@ -90,10 +99,11 @@ class ETLService(metaclass=abc.ABCMeta):
                     self._upsert_held(ETLHeldRecord, source, new_rows, now)
                 imported = {str(r.get("external_id")) for r in (transformed_batch or [])
                             if isinstance(r, dict) and r.get("external_id") is not None}
-                if imported:
+                if imported and imported_ok:
                     ETLHeldRecord.objects.filter(
                         source_name=source, external_id__in=imported, resolved_at__isnull=True,
                     ).update(resolved_at=now)
+            self._held_persisted = end
         except Exception as e:
             logger.error("api_etl[%s]: could not persist held records: %s", source, e,
                          exc_info=e)

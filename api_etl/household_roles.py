@@ -31,6 +31,25 @@ HEAD = "HEAD"
 PRIMARY = "PRIMARY"
 
 
+def _normalise_recipient(value):
+    """Canonical string for a `household_recipient` marker.
+
+    None/'' -> None; a number (1, 1.0, "1.0" - what a pandas round trip of a column
+    mixing blanks and "1" produces) -> its integer string when whole; anything else ->
+    the stripped string.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("nan", "none"):
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return str(int(number)) if number == int(number) else text
+
+
 def role_value(name):
     """Map a Role ATTRIBUTE name to the value the column stores.
 
@@ -180,8 +199,8 @@ def flag_household_head_status(group_codes=None, dry_run=False):
         primary = next((m for m in members if m.recipient_type == PRIMARY), None)
         if primary is None:
             recipient_source = "none"
-        elif str((primary.individual.json_ext or {}).get("household_recipient")) \
-                == str(RECIPIENT_PRIMARY):
+        elif _normalise_recipient((primary.individual.json_ext or {}).get("household_recipient")) \
+                == _normalise_recipient(RECIPIENT_PRIMARY):
             recipient_source = "declared"
         else:
             recipient_source = "auto_assigned"

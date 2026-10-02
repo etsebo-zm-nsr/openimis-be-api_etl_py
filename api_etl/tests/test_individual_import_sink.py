@@ -133,6 +133,50 @@ class TestIndividualImportSink(TestCase):
         expected_csv = 'external_id,name,age\r\n456,Jane Smith,25\r\n'
         self.assertEqual(content, expected_csv)
 
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_reports_overall_success(self, mock_get_workflows, mock_import_individuals):
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        new = {'external_id': 456, 'name': 'Jane'}
+        mock_import_individuals.return_value = {'success': True}
+        self.assertIs(sink.push([dict(new)]), True)
+        mock_import_individuals.return_value = {'success': False}
+        self.assertIs(sink.push([dict(new, external_id=457)]), False)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_unresolved_existing_keeps_current_location(self, mock_get_workflows,
+                                                       mock_import_individuals):
+        from location.models import Location
+        mock_get_workflows.side_effect = mock_get_workflow
+        mock_import_individuals.return_value = {'success': True}
+        village = Location(code='V001', name='Kafue', type='V', validity_from='2020-01-01')
+        village.save()
+        self.individual.location = village
+        self.individual.save(user=self.user)
+        no_loc = Individual(first_name='No', last_name='Loc', dob='1990-01-01',
+                            json_ext={'external_id': 789})
+        no_loc.save(user=self.user)
+
+        def unresolved(external_id):
+            return {'external_id': external_id, 'location_match': 'unresolved',
+                    'source_location': 'A / B / C', 'location_code': None,
+                    'location_name': None}
+
+        records = [unresolved(123), unresolved(789), unresolved(999)]
+        IndividualImportSink(self.user).push(records)
+
+        by_id = {r['external_id']: r for r in records}
+        self.assertEqual(by_id[123]['location_code'], 'V001')
+        self.assertEqual(by_id[123]['location_name'], 'Kafue')
+        self.assertEqual(by_id[123]['location_match'], 'unresolved_kept_existing')
+        self.assertEqual(by_id[123]['source_location'], 'A / B / C')
+        self.assertIsNone(by_id[789]['location_code'])
+        self.assertEqual(by_id[789]['location_match'], 'unresolved')
+        self.assertIsNone(by_id[999]['location_code'])
+        self.assertEqual(by_id[999]['location_match'], 'unresolved')
+
 
 def mock_get_workflow(name, group):
     return {

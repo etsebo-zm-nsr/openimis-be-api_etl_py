@@ -56,6 +56,10 @@ class SanitiseTestCase(TestCase):
         out = sanitise_for_jsonb({"k\ud819": ["a\ud819b", {"n": "x\udfffy"}]})
         self.assertEqual(out, {"k�": ["a�b", {"n": "x�y"}]})
 
+    def test_nul_stripped_from_keys_and_values(self):
+        out = sanitise_for_jsonb({"k\x00": ["Ban\x00da"]})
+        self.assertEqual(out, {"k": ["Banda"]})
+
     def test_nan_and_unknown_types(self):
         out = sanitise_for_jsonb({"a": float("nan"), "b": 1.5, "c": object, "d": None})
         self.assertIsNone(out["a"])
@@ -124,6 +128,41 @@ class HeldPersistenceTestCase(TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["records_skipped"], 1)
         self.assertEqual(result["data"]["batches_pushed"], 1)
+
+    def test_held_row_with_nul_persists(self):
+        result = _run([[GOOD, dict(BAD, ln="Ban\x00da")]])
+        self.assertTrue(result["success"])
+        held = ETLHeldRecord.objects.get(external_id="2")
+        self.assertEqual(held.raw_payload["ln"], "Banda")
+
+    def test_failed_persistence_is_retried_with_the_next_batch(self):
+        bad3 = dict(BAD, id="3")
+        real = ETLService._upsert_held
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("db blip")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(ETLService, "_upsert_held", side_effect=flaky):
+            with self.assertLogs("api_etl.services.base", level="ERROR"):
+                result = _run([[BAD], [bad3]])
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            sorted(ETLHeldRecord.objects.values_list("external_id", flat=True)), ["2", "3"])
+
+    def test_failed_push_does_not_resolve_held_records(self):
+        _run([[BAD]])
+
+        class FailingSink:
+            def push(self, batch, identifier):
+                return False
+
+        service = ETLService(_Source([[dict(BAD, d="1950-12-10")]]), _adapter(), FailingSink())
+        service.execute()
+        self.assertIsNone(ETLHeldRecord.objects.get(external_id="2").resolved_at)
 
     def test_adapter_without_held_rows_is_fine(self):
         class Plain:

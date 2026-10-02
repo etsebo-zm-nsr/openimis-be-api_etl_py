@@ -229,3 +229,25 @@ class FlagHouseholdHeadStatusTestCase(TestCase):
         summary = self._run()
         self.assertEqual(summary["no_source"], 1)
         self.assertEqual(Group.objects.get(pk=self.group.pk).json_ext, {"keep": "me"})
+
+
+    # household_recipient read back from the CSV as 1.0 is still 'declared'.
+    def test_float_and_string_markers_are_declared_other_is_not(self):
+        for recipient, expected in ((1.0, "declared"), ("1.0", "declared"), (1, "declared"),
+                                    ("1", "declared"), (2.0, "auto_assigned")):
+            GroupIndividual.objects.filter(group=self.group).delete()
+            self._member("Head", "HEAD", recipient_type="PRIMARY", recipient=recipient)
+            self._run()
+            self.assertEqual(self._flags()[1], expected, recipient)
+
+
+class NormaliseRecipientTestCase(TestCase):
+
+    def test_numeric_forms_of_the_primary_marker_agree(self):
+        from api_etl.household_roles import _normalise_recipient
+        for value in (1, 1.0, "1", "1.0", " 1 "):
+            self.assertEqual(_normalise_recipient(value), "1")
+        self.assertEqual(_normalise_recipient(2.0), "2")
+        for value in (None, "", float("nan")):
+            self.assertIsNone(_normalise_recipient(value))
+        self.assertEqual(_normalise_recipient("x"), "x")

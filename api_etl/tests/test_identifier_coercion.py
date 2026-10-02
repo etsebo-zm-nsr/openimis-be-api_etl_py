@@ -53,6 +53,18 @@ class CoerceIdentifierColumnsTestCase(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.json_ext["national_id"], "012345678")
 
+    def test_household_recipient_float_is_restored(self):
+        upload = self._upload()
+        row = self._row(upload)
+        row.json_ext["household_recipient"] = 1.0
+        row.save(username=self.user.login_name)
+        batch = [{"external_id": "zispis:1", "household_recipient": "1"}]
+
+        self.sink._coerce_identifier_columns(self._result(upload), batch)
+
+        row.refresh_from_db()
+        self.assertEqual(row.json_ext["household_recipient"], "1")
+
     def test_reformatting_a_float_loses_a_leading_zero(self):
         """The fallback path (no matching batch record) reformats instead - documenting
         exactly the loss the batch-matching path in test above exists to avoid."""

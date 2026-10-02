@@ -333,6 +333,9 @@ class BaseMappingAdapter(DataAdapter):
         "unresolved"); the last two also get `source_location`, the place names as sent
         ("district / constituency / ward", "?" for a missing level), for review.
 
+        The sink may later rewrite "unresolved" to "unresolved_kept_existing" for an
+        already-imported individual whose current location it preserves.
+
         A row that resolves by neither route is imported WITHOUT a location, flagged
         "unresolved". This supersedes the earlier "a person placed in the wrong village
         is worse than a person rejected": the person now has NO location rather than a
