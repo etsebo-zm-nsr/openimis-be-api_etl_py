@@ -113,3 +113,91 @@ def reconcile_household_roles(group_codes=None, dry_run=False):
             " (dry run)" if dry_run else "",
         )
     return summary
+
+
+def flag_household_head_status(group_codes=None, dry_run=False):
+    """Record on each household whether its head is active and who declared the recipient.
+
+    Real households often have no active head: the head the source names may be
+    SUSPENDED or GRADUATED, or there may be no head at all. The business rule is to never
+    create or remove a head and to keep the one the source named, so the household is
+    FLAGGED instead. Two keys are merged into `Group.json_ext`:
+
+      * `head_status` - the head individual's `json_ext["status"]` upper-cased, "UNKNOWN"
+        if the head has none, or "NO_HEAD" if the household has no HEAD member. With
+        several heads the lowest individual id is used and `multiple_heads` is counted.
+      * `primary_recipient_source` - "declared" if the PRIMARY member's individual carries
+        `household_recipient` equal to the source's primary marker, "auto_assigned" if
+        there is a PRIMARY the source did not declare (upstream promoted someone), "none"
+        if nobody is PRIMARY.
+
+    Same selection as `reconcile_household_roles`: non-deleted groups, and households
+    where no member carries an ETL `household_role` are skipped.
+
+    Upstream trap: `GroupAndGroupIndividualAlignmentService.update_json_ext_for_group`
+    runs on every GroupIndividual save and rewrites the group's json_ext so its
+    non-reserved keys mirror the HEAD individual's json_ext, deleting other keys. Any
+    later member save can therefore wipe these flags. This function is idempotent and is
+    meant to be re-run after every import. Writes use `update()`, never `save()`, and no
+    role or recipient is ever changed here.
+
+    Returns a summary dict: counts per head_status value under "head_status", per
+    source under "primary_recipient_source", plus "groups", "multiple_heads", "no_source"
+    and "changed".
+    """
+    from api_etl.adapters.base_mapping_adapter import RECIPIENT_PRIMARY
+    from individual.models import Group, GroupIndividual
+
+    groups = Group.objects.filter(is_deleted=False)
+    if group_codes:
+        groups = groups.filter(code__in=list(group_codes))
+
+    summary = {"groups": 0, "no_source": 0, "multiple_heads": 0, "changed": 0,
+               "head_status": defaultdict(int),
+               "primary_recipient_source": defaultdict(int)}
+
+    for group in groups.iterator():
+        members = list(
+            GroupIndividual.objects.filter(group=group, is_deleted=False)
+            .select_related("individual")
+        )
+        if not any((m.individual.json_ext or {}).get("household_role") for m in members):
+            summary["no_source"] += 1
+            continue
+        summary["groups"] += 1
+
+        heads = sorted((m for m in members if m.role == HEAD),
+                       key=lambda m: str(m.individual_id))
+        if heads:
+            if len(heads) > 1:
+                summary["multiple_heads"] += 1
+            status = (heads[0].individual.json_ext or {}).get("status")
+            head_status = str(status).strip().upper() if status else ""
+            head_status = head_status or "UNKNOWN"
+        else:
+            head_status = "NO_HEAD"
+
+        primary = next((m for m in members if m.recipient_type == PRIMARY), None)
+        if primary is None:
+            recipient_source = "none"
+        elif str((primary.individual.json_ext or {}).get("household_recipient")) \
+                == str(RECIPIENT_PRIMARY):
+            recipient_source = "declared"
+        else:
+            recipient_source = "auto_assigned"
+
+        summary["head_status"][head_status] += 1
+        summary["primary_recipient_source"][recipient_source] += 1
+
+        current = dict(group.json_ext or {})
+        wanted = {"head_status": head_status, "primary_recipient_source": recipient_source}
+        if all(current.get(k) == v for k, v in wanted.items()):
+            continue
+        summary["changed"] += 1
+        if not dry_run:
+            current.update(wanted)
+            Group.objects.filter(pk=group.pk).update(json_ext=current)
+
+    summary["head_status"] = dict(summary["head_status"])
+    summary["primary_recipient_source"] = dict(summary["primary_recipient_source"])
+    return summary

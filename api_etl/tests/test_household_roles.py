@@ -11,7 +11,7 @@ household" check still passes, so nothing surfaces it.
 """
 from django.test import TestCase
 
-from api_etl.household_roles import reconcile_household_roles
+from api_etl.household_roles import flag_household_head_status, reconcile_household_roles
 from core.models import User
 from individual.models import Group, GroupIndividual, Individual
 
@@ -123,3 +123,109 @@ class StoredRoleIsAValidChoiceTestCase(ReconcileHouseholdRolesTestCase):
         stored = self._state()["Cousin"][0]
         self.assertEqual(stored, "OTHER RELATIVE")
         self.assertIn(stored, valid)
+
+
+class FlagHouseholdHeadStatusTestCase(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.filter(username="Admin").first() or User.objects.create(
+            username="test_etl_roles")
+        self.group = Group(code="TEST-HH-F", json_ext={"keep": "me"})
+        self.group.save(user=self.user)
+
+    def _member(self, name, role, recipient_type=None, status=None,
+                household_role="X", recipient=None):
+        ext = {"household_role": household_role}
+        if status is not None:
+            ext["status"] = status
+        if recipient is not None:
+            ext["household_recipient"] = recipient
+        individual = Individual(first_name=name, last_name="Banda", dob="1990-01-01",
+                                json_ext=ext)
+        individual.save(user=self.user)
+        member = GroupIndividual(group=self.group, individual=individual)
+        member.save(user=self.user)
+        GroupIndividual.objects.filter(pk=member.pk).update(
+            role=role, recipient_type=recipient_type)
+        # the save cascade rewrote group json_ext; put the fixture state back
+        Group.objects.filter(pk=self.group.pk).update(json_ext={"keep": "me"})
+
+    def _flags(self):
+        ext = Group.objects.get(pk=self.group.pk).json_ext
+        return ext["head_status"], ext["primary_recipient_source"]
+
+    def _run(self, **kw):
+        return flag_household_head_status(group_codes=["TEST-HH-F"], **kw)
+
+    def _snapshot(self):
+        return sorted(GroupIndividual.objects.filter(group=self.group).values_list(
+            "id", "role", "recipient_type"))
+
+    def test_head_statuses(self):
+        for status, expected in (("ACTIVE", "ACTIVE"), ("suspended", "SUSPENDED"),
+                                 ("GRADUATED", "GRADUATED")):
+            GroupIndividual.objects.filter(group=self.group).delete()
+            self._member("Head", "HEAD", status=status)
+            summary = self._run()
+            self.assertEqual(self._flags()[0], expected)
+            self.assertEqual(summary["head_status"], {expected: 1})
+
+    def test_no_head(self):
+        self._member("Junior", "SON", recipient_type="PRIMARY")
+        self.assertEqual(self._flags_after_run()[0], "NO_HEAD")
+
+    def _flags_after_run(self):
+        self._run()
+        return self._flags()
+
+    def test_head_without_status_is_unknown(self):
+        self._member("Mary", "HEAD")
+        self.assertEqual(self._flags_after_run()[0], "UNKNOWN")
+
+    def test_multiple_heads_counted(self):
+        self._member("A", "HEAD", status="ACTIVE")
+        self._member("B", "HEAD", status="SUSPENDED")
+        summary = self._run()
+        self.assertEqual(summary["multiple_heads"], 1)
+        self.assertEqual(summary["groups"], 1)
+
+    def test_recipient_declared(self):
+        self._member("Mary", "HEAD", recipient_type="PRIMARY", recipient="1")
+        self.assertEqual(self._flags_after_run()[1], "declared")
+
+    def test_recipient_auto_assigned(self):
+        self._member("Mary", "HEAD", recipient_type="PRIMARY")
+        self.assertEqual(self._flags_after_run()[1], "auto_assigned")
+
+    def test_recipient_none(self):
+        self._member("Mary", "HEAD")
+        self.assertEqual(self._flags_after_run()[1], "none")
+
+    def test_idempotent(self):
+        self._member("Mary", "HEAD", status="ACTIVE")
+        self.assertEqual(self._run()["changed"], 1)
+        self.assertEqual(self._run()["changed"], 0)
+
+    def test_dry_run_writes_nothing(self):
+        self._member("Mary", "HEAD", status="ACTIVE")
+        summary = self._run(dry_run=True)
+        self.assertEqual(summary["changed"], 1)
+        self.assertEqual(Group.objects.get(pk=self.group.pk).json_ext, {"keep": "me"})
+
+    def test_existing_keys_preserved(self):
+        self._member("Mary", "HEAD", status="ACTIVE")
+        self._run()
+        self.assertEqual(Group.objects.get(pk=self.group.pk).json_ext["keep"], "me")
+
+    def test_roles_and_recipients_never_changed(self):
+        self._member("Junior", "SON", recipient_type="PRIMARY")
+        self._member("Mary", "HEAD", status="SUSPENDED")
+        before = self._snapshot()
+        self._run()
+        self.assertEqual(self._snapshot(), before)
+
+    def test_non_etl_household_skipped(self):
+        self._member("Other", "SPOUSE", household_role="")
+        summary = self._run()
+        self.assertEqual(summary["no_source"], 1)
+        self.assertEqual(Group.objects.get(pk=self.group.pk).json_ext, {"keep": "me"})
