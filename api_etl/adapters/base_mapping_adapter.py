@@ -134,7 +134,12 @@ class BaseMappingAdapter(DataAdapter):
         return self.clean_text_reporting(value)[0]
 
     def name_problems(self, record: dict) -> list:
-        """Quality problem codes for the configured name fields. Values are not changed."""
+        """Quality problem codes for the configured name fields. Values are not changed.
+
+        Letters are judged with str.isalnum(), which is Unicode-aware, so names written
+        with letters outside A-Z (Ñongolo, Saŕah, Ŋoma) are never flagged. A name equal
+        to the surname is not flagged either: Nyambe Nyambe is a common, valid name.
+        """
         fields = list(self.cfg.adapter.name_fields or [])
         codes = []
         for name in fields:
@@ -150,11 +155,12 @@ class BaseMappingAdapter(DataAdapter):
                 codes.append("placeholder")
             if len(text) == 1:
                 codes.append("single_character")
-        if "first_name" in fields and "last_name" in fields:
-            first, last = record.get("first_name"), record.get("last_name")
-            if (isinstance(first, str) and isinstance(last, str) and first.strip()
-                    and first.strip().casefold() == last.strip().casefold()):
-                codes.append("first_equals_last")
+            if not any(ch.isalnum() for ch in text):
+                # "....", "-": typed where the name was not known.
+                codes.append("punctuation_only")
+            elif not text[0].isalnum():
+                # ".Mulenga", "/JUNIOR": a stray mark before the name.
+                codes.append("leading_punctuation")
         return sorted(set(codes))
 
     def _plausible(self, parsed: datetime) -> bool:

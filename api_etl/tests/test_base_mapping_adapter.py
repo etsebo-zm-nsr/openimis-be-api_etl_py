@@ -555,17 +555,29 @@ class TextCleaningAndQualityTestCase(TestCase):
         self.assertEqual(self._quality("Chanda", "123456/78/1")[0],
                          "contains_digits;looks_like_nrc")
         self.assertEqual(self._quality("Chanda", "Unknown")[0], "placeholder")
-        self.assertEqual(self._quality("Chanda", "-")[0], "placeholder;single_character")
+        self.assertEqual(self._quality("Chanda", "-")[0],
+                         "placeholder;punctuation_only;single_character")
         self.assertEqual(self._quality("C", "Banda")[0], "single_character")
-        self.assertEqual(self._quality("Banda", "BANDA")[0], "first_equals_last")
+        self.assertEqual(self._quality("....", "Banda")[0], "punctuation_only")
+        self.assertEqual(self._quality("Precious", ".Mulenga")[0], "leading_punctuation")
+        self.assertEqual(self._quality("/JUNIOR", "Chisala")[0], "leading_punctuation")
+
+    def test_first_equal_to_last_is_not_flagged(self):
+        # Nyambe Nyambe is a common, valid Zambian name.
+        self.assertIsNone(self._quality("Nyambe", "NYAMBE")[0])
+
+    def test_non_english_letters_are_never_punctuation(self):
+        for first, last in (("\u00d1ongolo", "\u00c0mbuya"), ("\u014boma", "\u00c9lis\u00e9"),
+                            ("N'gandu", "Mwale-Banda")):
+            self.assertIsNone(self._quality(first, last)[0], (first, last))
 
     def test_nrc_with_spaces_is_detected(self):
         self.assertIn("looks_like_nrc", self._quality("Chanda", "123456 / 78 / 1")[0])
 
     def test_multiple_codes_joined_sorted_and_values_unchanged(self):
-        flag, record = self._quality("X", "x")
-        self.assertEqual(flag, "first_equals_last;single_character")
-        self.assertEqual((record["first_name"], record["last_name"]), ("X", "x"))
+        flag, record = self._quality("X", ".x")
+        self.assertEqual(flag, "leading_punctuation;single_character")
+        self.assertEqual((record["first_name"], record["last_name"]), ("X", ".x"))
 
     def test_clean_record_has_no_quality_keys(self):
         record = self._row().transform_row({"id": 1, "fn": "Chanda", "ln": "Banda"})
