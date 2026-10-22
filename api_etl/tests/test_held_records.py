@@ -37,6 +37,9 @@ def _adapter():
     cfg = build_source_config("held-src", {"adapter": {
         "field_map": {"first_name": "fn", "last_name": "ln", "dob": "d"},
         "external_id_field": "id",
+        # dob is not required by default (it is nullable in the registry); these tests
+        # exercise the hold-back mechanism and need some required column to trip it.
+        "required_fields": ["first_name", "last_name", "dob"],
     }})
     return BaseMappingAdapter(cfg)
 
