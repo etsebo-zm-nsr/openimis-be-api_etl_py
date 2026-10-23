@@ -160,7 +160,8 @@ class AdapterConfig:
     # these are held back and counted instead.
     # `dob` is deliberately absent: it is nullable in the registry, which stores "unknown"
     # as unknown rather than generate a date. A deployment whose `individual` still has
-    # dob NOT NULL must add it back here.
+    # dob NOT NULL does not need to add it back here: BaseMappingAdapter detects the
+    # NOT NULL column and requires `dob` for that adapter (with a one-time warning).
     required_fields: List[str] = field(
         default_factory=lambda: ["first_name", "last_name"])
     # THE single definition of "same person" for this source. Listed as OUTPUT column

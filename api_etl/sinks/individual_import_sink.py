@@ -108,7 +108,10 @@ class IndividualImportSink(DataSink):
     # ---------------------------------------------------------------- push
 
     def push(self, data: list[dict], batch_identifier=None):
-        """Import the batch. Returns True if every import call reported success.
+        """Import the batch. Returns True if every import call succeeded.
+
+        "Succeeded" means `import_individuals` reported success AND the upload it created
+        did not end in status FAIL - see `_batch_succeeded`.
 
         A batch with nothing to import, or whose existing records are skipped because
         `update_existing` is off, counts as success. The result is per batch, not per
@@ -120,7 +123,7 @@ class IndividualImportSink(DataSink):
 
         if new_records:
             result = self._import_new_records(new_records, batch_identifier)
-            ok = ok and bool((result or {}).get("success"))
+            ok = self._batch_succeeded(result) and ok
         else:
             logger.debug("No new record to import")
 
@@ -128,13 +131,47 @@ class IndividualImportSink(DataSink):
             if self.update_existing:
                 self._keep_existing_locations(existing_records)
                 result = self._update_existing_records(existing_records, batch_identifier)
-                ok = ok and bool((result or {}).get("success"))
+                ok = self._batch_succeeded(result) and ok
             else:
                 logger.debug(f"Skipped updating {len(existing_records)} existing records due to "
                              f"sink.update_existing = False")
         else:
             logger.debug("No existing record to update")
         return ok
+
+    def _batch_succeeded(self, result) -> bool:
+        """True if openIMIS accepted the batch, judged on the upload row, not just `result`.
+
+        `IndividualImportService.import_individuals` returns success even when the
+        workflow fails: `_trigger_workflow` catches the error and records it as
+        `IndividualDataSourceUpload.status = FAIL` instead. The returned dict alone would
+        therefore report a rejected batch as imported, and the held records in it would
+        be marked resolved. So the upload is read back.
+
+        Only FAIL counts as rejection. PARTIAL_SUCCESS means the workflow ran and flagged
+        some rows invalid - the batch was accepted - and the other statuses are
+        in-flight or maker-checker states (staged, awaiting approval), not failures.
+        If there is no upload uuid, or the row cannot be read, the reported `success`
+        stands.
+        """
+        if not result or not result.get("success"):
+            return False
+        upload_uuid = (result.get("data") or {}).get("upload_uuid")
+        if not upload_uuid:
+            return True
+        try:
+            from individual.models import IndividualDataSourceUpload
+            status = (IndividualDataSourceUpload.objects.filter(uuid=upload_uuid)
+                      .values_list("status", flat=True).first())
+        except Exception as exc:
+            logger.warning("api_etl: could not read back upload %s status: %s",
+                           upload_uuid, exc)
+            return True
+        if status == IndividualDataSourceUpload.Status.FAIL:
+            logger.error("api_etl: upload %s was rejected by openIMIS (status FAIL); "
+                         "treating the batch as not imported", upload_uuid)
+            return False
+        return True
 
     def _keep_existing_locations(self, existing_records):
         """Do not let an unresolved re-pull erase a location that is already set.

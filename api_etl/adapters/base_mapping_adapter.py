@@ -53,12 +53,28 @@ NAME_PLACEHOLDERS = frozenset({
 })
 _NRC_PATTERN = re.compile(r"\d{6}\s*/\s*\d{2}\s*/\s*\d")
 
+_dob_guard_warned = False
+
+
+def _dob_column_nullable() -> Optional[bool]:
+    """Whether `Individual.dob` accepts null in the installed `individual` module.
+
+    True on the Zambia fork, False on upstream. None when it cannot be determined (the
+    app is not importable), in which case the configured required fields stand.
+    """
+    try:
+        from individual.models import Individual
+        return bool(Individual._meta.get_field("dob").null)
+    except Exception:
+        return None
+
 
 class BaseMappingAdapter(DataAdapter):
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.required_fields = self._effective_required_fields()
         # (external_id, [missing field, ...]) for records held back this run.
         self.skipped: list = []
         # (external_id, [missing field, ...], raw source row) for the same records, so the
@@ -74,6 +90,29 @@ class BaseMappingAdapter(DataAdapter):
         self._locations = LocationIndex(depth=len(match_fields)) if match_fields else None
 
     # ---------------------------------------------------------------- helpers
+
+    def _effective_required_fields(self) -> list:
+        """`adapter.required_fields`, plus `dob` when the installed `individual` needs it.
+
+        The default config drops `dob` because the Zambia `individual` fork makes the
+        column nullable. Against upstream `individual` (dob NOT NULL) that default would
+        let one record without a date abort the whole INSERT ... SELECT batch, with
+        nothing in the config to say why. So the requirement follows the column, not the
+        deployment order. A copy is returned - the shared config is never mutated.
+        """
+        required = list(self.cfg.adapter.required_fields or [])
+        if "dob" not in required and _dob_column_nullable() is False:
+            required.append("dob")
+            global _dob_guard_warned
+            if not _dob_guard_warned:
+                _dob_guard_warned = True
+                logger.warning(
+                    "api_etl: the installed `individual` module declares Individual.dob "
+                    "NOT NULL (upstream), but 'dob' is not in adapter.required_fields. "
+                    "Requiring it anyway: one record without a date would otherwise "
+                    "abort its whole import batch. Records without a dob are held back. "
+                    "Deploy the nullable-dob `individual` fork to import them.")
+        return required
 
     @staticmethod
     def resolve_path(row: Any, path: str) -> Any:
@@ -402,7 +441,7 @@ class BaseMappingAdapter(DataAdapter):
         when pandas would later read it as NaN.
         """
         missing = []
-        for name in (self.cfg.adapter.required_fields or []):
+        for name in self.required_fields:
             value = record.get(name)
             text = "" if value is None else str(value).strip()
             if text in PANDAS_DEFAULT_NA_VALUES:

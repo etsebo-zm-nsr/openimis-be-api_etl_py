@@ -3,7 +3,7 @@ from unittest.mock import patch
 from api_etl.sinks.individual_import_sink import IndividualImportSink, IMPORT_NEW_INDIVIDUALS, UPDATE_EXISTING_INDIVIDUALS, WORKFLOW_GROUP
 from core.models import Language
 from core.test_helpers import LogInHelper
-from individual.models import Individual
+from individual.models import Individual, IndividualDataSourceUpload
 from django.core.files.uploadedfile import InMemoryUploadedFile
 from api_etl.apps import ApiEtlConfig
 
@@ -143,6 +143,59 @@ class TestIndividualImportSink(TestCase):
         self.assertIs(sink.push([dict(new)]), True)
         mock_import_individuals.return_value = {'success': False}
         self.assertIs(sink.push([dict(new, external_id=457)]), False)
+
+    def _upload(self, status):
+        upload = IndividualDataSourceUpload(source_name='t', source_type='individual import',
+                                            status=status)
+        upload.save(username=self.user.login_name)
+        return upload
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_fails_when_the_upload_ended_in_fail(self, mock_get_workflows,
+                                                      mock_import_individuals):
+        """import_individuals reports success even when the workflow failed - it records
+        FAIL on the upload row instead. push must read that back."""
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        upload = self._upload(IndividualDataSourceUpload.Status.FAIL)
+        mock_import_individuals.return_value = {
+            'success': True, 'data': {'upload_uuid': upload.uuid}}
+        self.assertIs(sink.push([{'external_id': 456, 'name': 'Jane'}]), False)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_fails_when_only_the_update_upload_failed(self, mock_get_workflows,
+                                                           mock_import_individuals):
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        good = self._upload(IndividualDataSourceUpload.Status.SUCCESS)
+        bad = self._upload(IndividualDataSourceUpload.Status.FAIL)
+        mock_import_individuals.side_effect = [
+            {'success': True, 'data': {'upload_uuid': good.uuid}},
+            {'success': True, 'data': {'upload_uuid': bad.uuid}},
+        ]
+        data = [{'external_id': 123, 'name': 'John'}, {'external_id': 456, 'name': 'Jane'}]
+        self.assertIs(sink.push(data), False)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_succeeds_for_accepted_upload_statuses(self, mock_get_workflows,
+                                                        mock_import_individuals):
+        """SUCCESS, PARTIAL_SUCCESS (some rows flagged invalid) and WAITING_FOR_VERIFICATION
+        (maker-checker) are accepted batches; a missing upload uuid keeps the reported
+        success."""
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        statuses = IndividualDataSourceUpload.Status
+        for i, status in enumerate((statuses.SUCCESS, statuses.PARTIAL_SUCCESS,
+                                    statuses.WAITING_FOR_VERIFICATION)):
+            upload = self._upload(status)
+            mock_import_individuals.return_value = {
+                'success': True, 'data': {'upload_uuid': upload.uuid}}
+            self.assertIs(sink.push([{'external_id': 500 + i, 'name': 'X'}]), True, status)
+        mock_import_individuals.return_value = {'success': True, 'data': {}}
+        self.assertIs(sink.push([{'external_id': 600, 'name': 'X'}]), True)
 
     @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
     @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')

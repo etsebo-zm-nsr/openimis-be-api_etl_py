@@ -167,6 +167,38 @@ class HeldPersistenceTestCase(TestCase):
         service.execute()
         self.assertIsNone(ETLHeldRecord.objects.get(external_id="2").resolved_at)
 
+    def _run_through_real_sink(self, upload_status):
+        """ETLService with the REAL IndividualImportSink; only `import_individuals` is
+        mocked, returning what upstream returns when its workflow failed: success=True
+        and the failure recorded on the upload row."""
+        from core.models import Language
+        from core.test_helpers import LogInHelper
+        from individual.models import IndividualDataSourceUpload
+        from api_etl.sinks.individual_import_sink import IndividualImportSink
+
+        Language.objects.get_or_create(code='en', defaults={'name': 'English', 'sort_order': 1})
+        user = LogInHelper().get_or_create_user_api()
+        upload = IndividualDataSourceUpload(source_name="t", source_type="individual import",
+                                            status=upload_status)
+        upload.save(username=user.login_name)
+        sink = IndividualImportSink(user)
+        returned = {"success": True, "data": {"upload_uuid": upload.uuid}}
+        fixed = dict(BAD, d="1950-12-10")
+        with mock.patch.object(sink.service, "import_individuals", return_value=returned):
+            return ETLService(_Source([[fixed]]), _adapter(), sink).execute()
+
+    def test_rejected_upload_does_not_resolve_held_records(self):
+        from individual.models import IndividualDataSourceUpload
+        _run([[BAD]])
+        self._run_through_real_sink(IndividualDataSourceUpload.Status.FAIL)
+        self.assertIsNone(ETLHeldRecord.objects.get(external_id="2").resolved_at)
+
+    def test_accepted_upload_resolves_held_records(self):
+        from individual.models import IndividualDataSourceUpload
+        _run([[BAD]])
+        self._run_through_real_sink(IndividualDataSourceUpload.Status.SUCCESS)
+        self.assertIsNotNone(ETLHeldRecord.objects.get(external_id="2").resolved_at)
+
     def test_adapter_without_held_rows_is_fine(self):
         class Plain:
             def transform(self, data):

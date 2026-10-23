@@ -10,6 +10,8 @@ Each assertion here corresponds to a failure mode that is SILENT in production:
 * blank/invalid `individual_role` -> `_individual_role_parser` calls `.upper()` on a NaN
   and raises deep inside the import workflow (G6).
 """
+from unittest import mock
+
 from django.test import TestCase
 
 from api_etl.adapters.base_mapping_adapter import BaseMappingAdapter
@@ -338,6 +340,54 @@ class RequiredFieldsTestCase(TestCase):
 
     def _dob_required(self):
         return self._adapter(required_fields=["first_name", "last_name", "dob"])
+
+    def test_dob_is_required_when_the_column_is_not_nullable(self):
+        """Upstream `individual` (dob NOT NULL): one record with no date would abort the
+        whole INSERT batch, so the adapter requires dob even though the config does not."""
+        with mock.patch("api_etl.adapters.base_mapping_adapter._dob_column_nullable",
+                        return_value=False):
+            adapter = self._adapter()
+        out = adapter.transform([
+            {"id": "1", "fn": "Grace", "ln": "Hopper", "d": "1906-12-09"},
+            {"id": "2", "fn": "NoDob", "ln": "Person", "d": None},
+        ])
+        self.assertEqual([r["first_name"] for r in out], ["Grace"])
+        self.assertEqual(adapter.skipped, [("2", ["dob"])])
+        # the shared config object is not mutated
+        self.assertEqual(adapter.cfg.adapter.required_fields, ["first_name", "last_name"])
+
+    def test_dob_is_not_added_when_the_column_is_nullable(self):
+        with mock.patch("api_etl.adapters.base_mapping_adapter._dob_column_nullable",
+                        return_value=True):
+            adapter = self._adapter()
+        out = adapter.transform([{"id": "2", "fn": "NoDob", "ln": "Person", "d": None}])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(adapter.skipped, [])
+
+    def test_dob_is_left_alone_when_nullability_is_unknown(self):
+        with mock.patch("api_etl.adapters.base_mapping_adapter._dob_column_nullable",
+                        return_value=None):
+            adapter = self._adapter()
+        self.assertEqual(adapter.required_fields, ["first_name", "last_name"])
+
+    def test_not_null_dob_warns_once(self):
+        base_module = "api_etl.adapters.base_mapping_adapter"
+        with mock.patch(f"{base_module}._dob_guard_warned", False), \
+                mock.patch(f"{base_module}._dob_column_nullable", return_value=False):
+            with self.assertLogs(base_module, level="WARNING") as logs:
+                self._adapter()
+                self._adapter()
+        self.assertEqual(len([m for m in logs.output if "NOT NULL" in m]), 1)
+
+    def test_dob_column_nullable_reads_the_model_field(self):
+        from individual.models import Individual
+        from api_etl.adapters.base_mapping_adapter import _dob_column_nullable
+        field = Individual._meta.get_field("dob")
+        self.assertIs(_dob_column_nullable(), field.null)
+        with mock.patch.object(field, "null", False):
+            self.assertIs(_dob_column_nullable(), False)
+        with mock.patch.object(field, "null", True):
+            self.assertIs(_dob_column_nullable(), True)
 
     def test_dob_is_not_required_by_default(self):
         self.assertEqual(self._adapter().cfg.adapter.required_fields,
