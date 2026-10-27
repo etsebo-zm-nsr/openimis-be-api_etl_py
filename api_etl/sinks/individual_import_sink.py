@@ -27,6 +27,7 @@ GROUP_AGGREGATION_COLUMN = None
 IDENTIFIER_COLUMNS = (
     "national_id", "national_id_type", "external_id", "source_batch_id",
     "group_code", "household_ref", "recipient_info", "individual_role",
+    "household_recipient",
 )
 
 
@@ -107,22 +108,97 @@ class IndividualImportSink(DataSink):
     # ---------------------------------------------------------------- push
 
     def push(self, data: list[dict], batch_identifier=None):
+        """Import the batch. Returns True if every import call succeeded.
+
+        "Succeeded" means `import_individuals` reported success AND the upload it created
+        did not end in status FAIL - see `_batch_succeeded`.
+
+        A batch with nothing to import, or whose existing records are skipped because
+        `update_existing` is off, counts as success. The result is per batch, not per
+        record: openIMIS reports one outcome for each of the new/update uploads.
+        """
         data = self._stamp_provenance(data, batch_identifier)
         existing_records, new_records = self._split_existing_and_new(data)
+        ok = True
 
         if new_records:
-            self._import_new_records(new_records, batch_identifier)
+            result = self._import_new_records(new_records, batch_identifier)
+            ok = self._batch_succeeded(result) and ok
         else:
             logger.debug("No new record to import")
 
         if existing_records:
             if self.update_existing:
-                self._update_existing_records(existing_records, batch_identifier)
+                self._keep_existing_locations(existing_records)
+                result = self._update_existing_records(existing_records, batch_identifier)
+                ok = self._batch_succeeded(result) and ok
             else:
                 logger.debug(f"Skipped updating {len(existing_records)} existing records due to "
                              f"sink.update_existing = False")
         else:
             logger.debug("No existing record to update")
+        return ok
+
+    def _batch_succeeded(self, result) -> bool:
+        """True if openIMIS accepted the batch, judged on the upload row, not just `result`.
+
+        `IndividualImportService.import_individuals` returns success even when the
+        workflow fails: `_trigger_workflow` catches the error and records it as
+        `IndividualDataSourceUpload.status = FAIL` instead. The returned dict alone would
+        therefore report a rejected batch as imported, and the held records in it would
+        be marked resolved. So the upload is read back.
+
+        Only FAIL counts as rejection. PARTIAL_SUCCESS means the workflow ran and flagged
+        some rows invalid - the batch was accepted - and the other statuses are
+        in-flight or maker-checker states (staged, awaiting approval), not failures.
+        If there is no upload uuid, or the row cannot be read, the reported `success`
+        stands.
+        """
+        if not result or not result.get("success"):
+            return False
+        upload_uuid = (result.get("data") or {}).get("upload_uuid")
+        if not upload_uuid:
+            return True
+        try:
+            from individual.models import IndividualDataSourceUpload
+            status = (IndividualDataSourceUpload.objects.filter(uuid=upload_uuid)
+                      .values_list("status", flat=True).first())
+        except Exception as exc:
+            logger.warning("api_etl: could not read back upload %s status: %s",
+                           upload_uuid, exc)
+            return True
+        if status == IndividualDataSourceUpload.Status.FAIL:
+            logger.error("api_etl: upload %s was rejected by openIMIS (status FAIL); "
+                         "treating the batch as not imported", upload_uuid)
+            return False
+        return True
+
+    def _keep_existing_locations(self, existing_records):
+        """Do not let an unresolved re-pull erase a location that is already set.
+
+        An unresolved row carries `location_code`/`location_name` of None. For a NEW
+        individual that is intended (imported without a location). For an EXISTING one,
+        openIMIS's update SQL sets `location_id` from a LEFT JOIN on name+code, so
+        None/None writes NULL and would wipe a location a data owner assigned by hand.
+        Such rows are given the individual's current village (type 'V' - the only type
+        the join matches) and `location_match = "unresolved_kept_existing"`;
+        `source_location` is left as sent. Individuals without a village are untouched.
+        """
+        unresolved = [r for r in existing_records
+                      if r.get("location_match") == "unresolved" and r.get("ID") is not None]
+        if not unresolved:
+            return
+        ids = {r["ID"] for r in unresolved}
+        current = {
+            pk: (code, name) for pk, code, name in Individual.objects.filter(
+                id__in=ids, location__isnull=False, location__type="V",
+            ).values_list("id", "location__code", "location__name")
+        }
+        for record in unresolved:
+            kept = current.get(record["ID"])
+            if kept:
+                record["location_code"], record["location_name"] = kept
+                record["location_match"] = "unresolved_kept_existing"
 
     def _stamp_provenance(self, data, batch_identifier):
         """Stamp the batch id on every record.
@@ -142,7 +218,7 @@ class IndividualImportSink(DataSink):
             import_file, self.import_new_workflow, self.group_aggregation_column
         )
         self._tag_upload(result_new)
-        self._coerce_identifier_columns(result_new)
+        self._coerce_identifier_columns(result_new, new_records)
         logger.debug(f"Imported {len(new_records)} new records with {result_new}")
         return result_new
 
@@ -152,46 +228,88 @@ class IndividualImportSink(DataSink):
             update_file, self.update_existing_workflow, self.group_aggregation_column
         )
         self._tag_upload(result_existing)
-        self._coerce_identifier_columns(result_existing)
+        self._coerce_identifier_columns(result_existing, existing_records)
         logger.debug(f"Updated {len(existing_records)} existing records with {result_existing}")
         return result_existing
 
-    def _coerce_identifier_columns(self, result):
+    def _coerce_identifier_columns(self, result, batch):
         """Restore identifier columns to strings after pandas type inference.
 
         `IndividualImportService.import_loaders` reads our CSV with
         `pd.read_csv(f, dtype={"location_code": str})` - only location_code is protected.
-        A purely numeric national_id therefore lands in IndividualDataSource.json_ext as
-        a float (float rather than int because blank values introduce NaN), so
+        A purely numeric national_id therefore lands in `IndividualDataSource.json_ext`
+        as a float (float rather than int because blank values introduce NaN), so
         "100001101" is stored as 100001101.0.
 
-        That silently breaks cross-source linkage, which matches on the normalised
-        string. Individuals are not created until the import is approved, so correcting
-        the staged rows here means the Individual records inherit the correct values.
+        Two destinations need correcting, not one. With maker-checker ON, the staged
+        `IndividualDataSource` rows are all there is - the `Individual` is only created
+        later, on approval, and inherits the corrected value from there. With
+        maker-checker OFF (the default here), `import_individuals` above creates the
+        `Individual` rows synchronously, inside the `INSERT ... SELECT` that runs before
+        this method is ever reached - from the still-float CSV values. So both the
+        staged row (always) and, when one already exists, the `Individual` it produced
+        (`IndividualDataSource.individual_id`) are corrected below.
+
+        The corrected value comes from `batch` - the ORIGINAL record dicts the adapter
+        produced, before they went through the CSV/pandas round trip - matched back to
+        each staged row by `external_id` (namespaced with a source prefix, so it is
+        never itself turned into a float). Reformatting the float instead
+        (`_as_identifier_string`) is only a fallback for rows we cannot match back to a
+        batch record: `int(float("012345678"))` is `12345678`, silently dropping the
+        leading zero. Matching to the original avoids that loss entirely.
         """
         if not result or not result.get("success"):
             return
         upload_uuid = (result.get("data") or {}).get("upload_uuid")
         if not upload_uuid:
             return
+        original_by_external_id = {
+            record.get("external_id"): record for record in (batch or [])
+            if record.get("external_id") is not None
+        }
         try:
-            from individual.models import IndividualDataSource
+            from individual.models import IndividualDataSource, Individual
             rows = IndividualDataSource.objects.filter(upload_id=upload_uuid)
+            individual_ids = set()
             for row in rows:
-                json_ext = row.json_ext or {}
-                changed = False
-                for column in IDENTIFIER_COLUMNS:
-                    value = json_ext.get(column)
-                    coerced = _as_identifier_string(value)
-                    if coerced is not value and coerced != value:
-                        json_ext[column] = coerced
-                        changed = True
+                json_ext, changed = self._coerce_json_ext(row.json_ext, original_by_external_id)
                 if changed:
                     row.json_ext = json_ext
                     row.save(update_fields=["json_ext"])
+                if row.individual_id:
+                    individual_ids.add(row.individual_id)
+            for individual in Individual.objects.filter(id__in=individual_ids):
+                json_ext, changed = self._coerce_json_ext(individual.json_ext, original_by_external_id)
+                if changed:
+                    # .update(), not .save(): HistoryModel.save() bumps the row's
+                    # version and requires a user - neither belongs in a background
+                    # correction of a value the import already committed.
+                    Individual.objects.filter(id=individual.id).update(json_ext=json_ext)
         except Exception as exc:
             logger.warning("api_etl: could not coerce identifier columns for upload %s: %s",
                            upload_uuid, exc)
+
+    @staticmethod
+    def _coerce_json_ext(json_ext, original_by_external_id):
+        """Correct IDENTIFIER_COLUMNS in one json_ext dict. Returns (json_ext, changed)."""
+        json_ext = dict(json_ext or {})
+        original = original_by_external_id.get(_as_identifier_string(json_ext.get("external_id")))
+        changed = False
+        for column in IDENTIFIER_COLUMNS:
+            if column not in json_ext:
+                # Correct values, never add keys. openIMIS's _clean_json_ext() removes
+                # group_code, recipient_info and individual_role from each Individual once
+                # the household is formed - copying them back from the batch would undo that.
+                continue
+            value = json_ext.get(column)
+            if original is not None and column in original:
+                coerced = original[column]
+            else:
+                coerced = _as_identifier_string(value)
+            if coerced is not value and coerced != value:
+                json_ext[column] = coerced
+                changed = True
+        return json_ext, changed
 
     def _tag_upload(self, result):
         """Correct IndividualDataSourceUpload.source_type after the fact.
@@ -256,6 +374,9 @@ class IndividualImportSink(DataSink):
 
         linked, new_records = self._link_by_identity_key(unmatched)
         existing_records.extend(linked)
+        # Same-batch duplicates: two records that share a key with EACH OTHER, never
+        # seen individually against the database. See _flag_in_batch_identity_duplicates.
+        self._flag_in_batch_identity_duplicates(new_records)
         # National id never merges - it only annotates. See _flag_national_id_matches.
         self._flag_national_id_matches(new_records)
         return existing_records, new_records
@@ -316,6 +437,41 @@ class IndividualImportSink(DataSink):
                         getattr(self.cfg, "name", "?"), len(linked))
         return linked, new_records
 
+    def _flag_in_batch_identity_duplicates(self, records: list[dict]) -> None:
+        """Flag identity-key collisions WITHIN this batch, never seen against the DB.
+
+        `_link_by_identity_key` only ever queries individuals already in the database -
+        two records new to the registry that share a key with EACH OTHER (a common
+        shape for a first full pull, or two siblings registered together) were never
+        compared and so never flagged. Detected here, on the same records, still never
+        merged: an existing DB-match note (set above) is left alone, so this only fills
+        in the records `_link_by_identity_key` had no evidence about.
+        """
+        if not records:
+            return
+        groups: dict = {}
+        for record in records:
+            key = record.get("identity_key")
+            if key:
+                groups.setdefault(key, []).append(record)
+        flagged = 0
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            for record in members:
+                if record.get("linkage_note"):     # a DB match already explains this one
+                    continue
+                others = [m.get("external_id") for m in members if m is not record][:5]
+                record["linkage_note"] = (
+                    f"identity key shared with {len(members) - 1} other record(s) in "
+                    f"this batch: {', '.join(str(o) for o in others)}"
+                )
+                flagged += 1
+        if flagged:
+            logger.info("api_etl[%s]: flagged %s record(s) sharing an identity key "
+                        "with another record in the same batch", getattr(self.cfg, "name", "?"),
+                        flagged)
+
     def _flag_national_id_matches(self, records: list[dict]) -> None:
         """Annotate national-id collisions WITHOUT merging.
 
@@ -323,6 +479,10 @@ class IndividualImportSink(DataSink):
         deduplication still to come. Merging on a shared NRC would fuse two different
         human beings, so this only records the candidates, giving the future dedup work
         its input and a caseworker the reason a record was suspected.
+
+        Checks the database first, then - for records still unexplained - this SAME
+        batch: `_find_by_national_id` only ever sees individuals already stored, so two
+        records new to the registry sharing an NRC with each other were never compared.
 
         Never sets record["ID"], so nothing is ever adopted on this evidence.
         """
@@ -333,20 +493,34 @@ class IndividualImportSink(DataSink):
         if not candidates:
             return
         matches = self._find_by_national_id(candidates)
+        batch_groups: dict = {}
+        for record in records:
+            national_id = _normalise_national_id(record.get("national_id"))
+            if national_id:
+                batch_groups.setdefault(national_id, []).append(record)
         flagged = 0
         for record in records:
             if record.get("linkage_note"):        # identity-key note takes precedence
                 continue
             national_id = _normalise_national_id(record.get("national_id"))
             found = matches.get(national_id) if national_id else None
-            if not found:
+            if found:
+                record["linkage_candidate_id"] = ",".join(str(m["id"]) for m in found[:5])
+                record["linkage_note"] = (
+                    f"national_id shared with {len(found)} existing individual(s); "
+                    f"NOT merged - duplicate NRCs are issued in Zambia. For review."
+                )
+                flagged += 1
                 continue
-            record["linkage_candidate_id"] = ",".join(str(m["id"]) for m in found[:5])
-            record["linkage_note"] = (
-                f"national_id shared with {len(found)} existing individual(s); "
-                f"NOT merged - duplicate NRCs are issued in Zambia. For review."
-            )
-            flagged += 1
+            members = batch_groups.get(national_id) if national_id else None
+            if members and len(members) > 1:
+                others = [m.get("external_id") for m in members if m is not record][:5]
+                record["linkage_note"] = (
+                    f"national_id shared with {len(members) - 1} other record(s) in "
+                    f"this batch: {', '.join(str(o) for o in others)}; NOT merged - "
+                    f"duplicate NRCs are issued in Zambia. For review."
+                )
+                flagged += 1
         if flagged:
             logger.info("api_etl[%s]: flagged %s record(s) sharing a national id "
                         "(not merged)", getattr(self.cfg, "name", "?"), flagged)
