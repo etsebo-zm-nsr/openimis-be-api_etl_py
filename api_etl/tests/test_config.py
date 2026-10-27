@@ -98,6 +98,15 @@ class BuildSourceConfigTestCase(TestCase):
         self.assertEqual(cfg.source.url, "u")
         self.assertFalse(hasattr(cfg.source, "nonsense_key"))
 
+    def test_adapter_options_survive_and_merge(self):
+        """Connector-only settings live in `adapter.options` and deep-merge like the rest."""
+        cfg = build_source_config("x", deep_merge(
+            {"adapter": {"options": {"roster_field": "g/roster", "head_only_fields": ["phone"]}}},
+            {"adapter": {"options": {"roster_field": "g/members"}}}))
+        self.assertEqual(cfg.adapter.options["roster_field"], "g/members")
+        self.assertEqual(cfg.adapter.options["head_only_fields"], ["phone"])
+        self.assertEqual(build_source_config("x").adapter.options, {})
+
     def test_config_is_immutable(self):
         cfg = build_source_config("x")
         with self.assertRaises(Exception):
