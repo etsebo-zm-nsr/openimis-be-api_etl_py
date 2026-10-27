@@ -47,22 +47,72 @@ PANDAS_DEFAULT_NA_VALUES = frozenset({
     "nan", "null",
 })
 
+# Name values that are placeholders rather than names. Flagged, never altered or dropped.
+NAME_PLACEHOLDERS = frozenset({
+    "UNKNOWN", "NONE", "NIL", "NULL", "TEST", "XXX", "NO NAME", "NONAME", "-", ".",
+})
+_NRC_PATTERN = re.compile(r"\d{6}\s*/\s*\d{2}\s*/\s*\d")
+
+_dob_guard_warned = False
+
+
+def _dob_column_nullable() -> Optional[bool]:
+    """Whether `Individual.dob` accepts null in the installed `individual` module.
+
+    True on the Zambia fork, False on upstream. None when it cannot be determined (the
+    app is not importable), in which case the configured required fields stand.
+    """
+    try:
+        from individual.models import Individual
+        return bool(Individual._meta.get_field("dob").null)
+    except Exception:
+        return None
+
 
 class BaseMappingAdapter(DataAdapter):
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.required_fields = self._effective_required_fields()
         # (external_id, [missing field, ...]) for records held back this run.
         self.skipped: list = []
+        # (external_id, [missing field, ...], raw source row) for the same records, so the
+        # service can persist what was held back. `skipped` keeps its 2-tuple shape.
+        self.held_rows: list = []
         # Rows excluded by `adapter.include_when` - a deliberate filter, not a fault.
         self.filtered: int = 0
         # external_ids whose place names did not match the loaded location tree.
         self.unresolved_locations: list = []
+        # external_ids resolved only by the district+ward fallback (constituency ignored).
+        self.fallback_locations: list = []
         match_fields = self.cfg.adapter.location_match_fields or []
         self._locations = LocationIndex(depth=len(match_fields)) if match_fields else None
 
     # ---------------------------------------------------------------- helpers
+
+    def _effective_required_fields(self) -> list:
+        """`adapter.required_fields`, plus `dob` when the installed `individual` needs it.
+
+        The default config drops `dob` because the Zambia `individual` fork makes the
+        column nullable. Against upstream `individual` (dob NOT NULL) that default would
+        let one record without a date abort the whole INSERT ... SELECT batch, with
+        nothing in the config to say why. So the requirement follows the column, not the
+        deployment order. A copy is returned - the shared config is never mutated.
+        """
+        required = list(self.cfg.adapter.required_fields or [])
+        if "dob" not in required and _dob_column_nullable() is False:
+            required.append("dob")
+            global _dob_guard_warned
+            if not _dob_guard_warned:
+                _dob_guard_warned = True
+                logger.warning(
+                    "api_etl: the installed `individual` module declares Individual.dob "
+                    "NOT NULL (upstream), but 'dob' is not in adapter.required_fields. "
+                    "Requiring it anyway: one record without a date would otherwise "
+                    "abort its whole import batch. Records without a dob are held back. "
+                    "Deploy the nullable-dob `individual` fork to import them.")
+        return required
 
     @staticmethod
     def resolve_path(row: Any, path: str) -> Any:
@@ -96,6 +146,22 @@ class BaseMappingAdapter(DataAdapter):
         cleaned = "".join(ch for ch in text if ch.isalnum())
         return cleaned.upper() or None
 
+    def clean_text_reporting(self, value: Any):
+        """Return `(cleaned, removed)`; `removed` is True when characters were dropped.
+
+        Whitespace is collapsed (so `\\n` and `\\t` become spaces, not removals). What is
+        REMOVED is any remaining control character (category Cc) and lone surrogate
+        (Cs, which PostgreSQL rejects). Text is NFC-normalised first so a decomposed
+        N + combining tilde equals the precomposed letter for linkage and search. Valid
+        Unicode letters are never altered beyond that.
+        """
+        if not isinstance(value, str) or not self.cfg.adapter.clean_whitespace:
+            return value, False
+        text = " ".join(unicodedata.normalize("NFC", value).split())
+        kept = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cs"))
+        removed = kept != text
+        return (" ".join(kept.split()) or None), removed
+
     def clean_text(self, value: Any) -> Any:
         """Collapse whitespace and drop control characters from a string value.
 
@@ -104,9 +170,37 @@ class BaseMappingAdapter(DataAdapter):
         record linkage confirms a national-ID match on surname, and `'\\nKaboyi'` never
         equals `'Kaboyi'`. Non-strings pass through untouched.
         """
-        if not isinstance(value, str) or not self.cfg.adapter.clean_whitespace:
-            return value
-        return " ".join(value.split()) or None
+        return self.clean_text_reporting(value)[0]
+
+    def name_problems(self, record: dict) -> list:
+        """Quality problem codes for the configured name fields. Values are not changed.
+
+        Letters are judged with str.isalnum(), which is Unicode-aware, so names written
+        with letters outside A-Z (Ñongolo, Saŕah, Ŋoma) are never flagged. A name equal
+        to the surname is not flagged either: Nyambe Nyambe is a common, valid name.
+        """
+        fields = list(self.cfg.adapter.name_fields or [])
+        codes = []
+        for name in fields:
+            value = record.get(name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            text = value.strip()
+            if any(ch.isdigit() for ch in text):
+                codes.append("contains_digits")
+            if _NRC_PATTERN.search(text):
+                codes.append("looks_like_nrc")
+            if text.upper() in NAME_PLACEHOLDERS:
+                codes.append("placeholder")
+            if len(text) == 1:
+                codes.append("single_character")
+            if not any(ch.isalnum() for ch in text):
+                # "....", "-": typed where the name was not known.
+                codes.append("punctuation_only")
+            elif not text[0].isalnum():
+                # ".Mulenga", "/JUNIOR": a stray mark before the name.
+                codes.append("leading_punctuation")
+        return sorted(set(codes))
 
     def _plausible(self, parsed: datetime) -> bool:
         """Reject dates that are data-entry artefacts rather than dates.
@@ -186,6 +280,7 @@ class BaseMappingAdapter(DataAdapter):
             missing = self.missing_required(record)
             if missing:
                 self.skipped.append((record.get("external_id"), missing))
+                self.held_rows.append((record.get("external_id"), missing, row))
                 continue
             if not self.keep_row(record):
                 self.filtered += 1
@@ -198,9 +293,15 @@ class BaseMappingAdapter(DataAdapter):
         if self.unresolved_locations:
             logger.warning(
                 "api_etl[%s]: %s row(s) did not match the loaded location tree and will "
-                "be rejected by validation. First few: %s", self.cfg.name,
+                "be imported WITHOUT a location, flagged. First few: %s", self.cfg.name,
                 len(self.unresolved_locations),
                 ", ".join(path for _, path in self.unresolved_locations[:5]))
+        if self.fallback_locations:
+            logger.warning(
+                "api_etl[%s]: %s row(s) matched on district and ward only (the "
+                "constituency disagrees with the loaded location tree). First few: %s",
+                self.cfg.name, len(self.fallback_locations),
+                ", ".join(path for _, path in self.fallback_locations[:5]))
         if self.skipped:
             by_field: dict = {}
             for _, fields in self.skipped:
@@ -269,28 +370,55 @@ class BaseMappingAdapter(DataAdapter):
         source and one derived. A source that sends names only therefore cannot supply
         `location_code` itself; it is looked up here.
 
-        A row that does not resolve keeps its mapped values and is counted. It will be
-        rejected by `individual`'s own location validation, which is the right outcome:
-        a person placed in the wrong village is worse than a person rejected for review.
+        Resolution tries the full path first. If that fails and there are at least two
+        levels, it retries on the first (district) and last (ward) level only, ignoring
+        the middle: the gazetteer is authoritative, and a source's constituency is the
+        level that most often disagrees. That resolves only if the ward is unique within
+        the district. Every record gets `location_match` ("exact", "district_ward" or
+        "unresolved"); the last two also get `source_location`, the place names as sent
+        ("district / constituency / ward", "?" for a missing level), for review.
 
-        An unresolved row still gets a `location_code` key, set to None. Without it, a
+        The sink may later rewrite "unresolved" to "unresolved_kept_existing" for an
+        already-imported individual whose current location it preserves.
+
+        A row that resolves by neither route is imported WITHOUT a location, flagged
+        "unresolved". This supersedes the earlier "a person placed in the wrong village
+        is worse than a person rejected": the person now has NO location rather than a
+        wrong one, and is never held back. `individual`'s import validation accepts a
+        row whose `location_name` and `location_code` are both empty, but rejects one
+        with a name and no code - so BOTH are blanked, not just the code.
+
+        An unresolved row still gets a `location_code` key (None). Without it, a
         batch where EVERY row fails to resolve produces a CSV with no location_code
         column at all - `union_of_keys` only emits columns some row actually carries -
         and openIMIS rejects the whole upload with "missing essential header:
-        location_code" instead of rejecting the rows individually, as a partly-resolved
-        batch does.
+        location_code" instead of accepting the rows.
         """
         adapter = self.cfg.adapter
         if not self._locations:
             return
         levels = adapter.location_match_fields
+        sent = " / ".join(str(self.clean_text(record.get(level)) or "?") for level in levels)
         names = apply_aliases([record.get(level) for level in levels],
                               adapter.location_aliases, levels)
+        external_id = record.get("external_id")
         resolved = self._locations.resolve(names)
+        if resolved is not None:
+            record["location_match"] = "exact"
+        else:
+            resolved = self._locations.resolve_skipping_middle(names) \
+                if len(levels) >= 2 else None
+            if resolved is not None:
+                record["location_match"] = "district_ward"
+                record["source_location"] = sent
+                self.fallback_locations.append((external_id, sent))
         if resolved is None:
             self.unresolved_locations.append(
-                (record.get("external_id"), "/".join(str(n or "?") for n in names)))
+                (external_id, "/".join(str(n or "?") for n in names)))
+            record["location_match"] = "unresolved"
+            record["source_location"] = sent
             record["location_code"] = None
+            record["location_name"] = None
             return
         code, canonical = resolved
         record["location_code"] = code
@@ -313,7 +441,7 @@ class BaseMappingAdapter(DataAdapter):
         when pandas would later read it as NaN.
         """
         missing = []
-        for name in (self.cfg.adapter.required_fields or []):
+        for name in self.required_fields:
             value = record.get(name)
             text = "" if value is None else str(value).strip()
             if text in PANDAS_DEFAULT_NA_VALUES:
@@ -324,8 +452,11 @@ class BaseMappingAdapter(DataAdapter):
         adapter = self.cfg.adapter
         record: dict = {}
 
+        stripped = []
         for target, path in (adapter.field_map or {}).items():
-            record[target] = self.clean_text(self.resolve_path(row, path))
+            record[target], removed = self.clean_text_reporting(self.resolve_path(row, path))
+            if removed:
+                stripped.append(target)
         for target, value in (adapter.constants or {}).items():
             record[target] = value
 
@@ -337,6 +468,14 @@ class BaseMappingAdapter(DataAdapter):
                            self.cfg.name, adapter.external_id_field)
             return None
         record["external_id"] = external_id
+
+        # Flag, never block: values are stored as the source sent them (minus unstorable
+        # characters) and the problem is recorded in json_ext for users to filter on.
+        if stripped:
+            record["text_quality"] = "invalid_characters_removed:" + ",".join(sorted(stripped))
+        problems = self.name_problems(record)
+        if problems:
+            record["name_quality"] = ";".join(problems)
 
         if "dob" in record:
             record["dob"] = self.parse_date(record.get("dob"))
@@ -372,6 +511,9 @@ class BaseMappingAdapter(DataAdapter):
                     record["recipient_info"] = self.map_recipient(
                         self.resolve_path(row, adapter.recipient_field)
                     )
+                    # Durable copy: upstream strips `recipient_info` after grouping, and
+                    # a later post-import step needs to know the source declared it.
+                    record["household_recipient"] = record["recipient_info"]
             else:
                 logger.warning(
                     "api_etl[%s]: row %s has no group code - it will import as an individual "

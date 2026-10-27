@@ -9,11 +9,12 @@ goes wrong and why it cannot be prevented from the emitting side.
 """
 from django.core.management.base import BaseCommand
 
-from api_etl.household_roles import reconcile_household_roles
+from api_etl.household_roles import flag_household_head_status, reconcile_household_roles
 
 
 class Command(BaseCommand):
-    help = "Repair household roles and primary recipients after an ETL group import."
+    help = ("Repair household roles and primary recipients after an ETL group import, "
+            "then flag households by head status (re-run after every import).")
 
     def add_arguments(self, parser):
         parser.add_argument("--code", action="append", dest="codes",
@@ -32,5 +33,13 @@ class Command(BaseCommand):
             f"primary recipients moved : {summary['recipients_moved']}\n"
             f"households skipped       : {summary['no_source']} (no ETL household_role)"
         ))
+        flags = flag_household_head_status(
+            group_codes=options.get("codes"), dry_run=options["dry_run"])
+        self.stdout.write(
+            f"households flagged       : {flags['changed']} changed\n"
+            f"head status              : {flags['head_status']}\n"
+            f"primary recipient source : {flags['primary_recipient_source']}\n"
+            f"households with >1 head  : {flags['multiple_heads']}"
+        )
         if options["dry_run"]:
             self.stdout.write("(dry run - nothing was written)")

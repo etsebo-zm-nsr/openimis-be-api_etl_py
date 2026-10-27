@@ -10,6 +10,8 @@ Each assertion here corresponds to a failure mode that is SILENT in production:
 * blank/invalid `individual_role` -> `_individual_role_parser` calls `.upper()` on a NaN
   and raises deep inside the import workflow (G6).
 """
+from unittest import mock
+
 from django.test import TestCase
 
 from api_etl.adapters.base_mapping_adapter import BaseMappingAdapter
@@ -319,9 +321,11 @@ class ImplausibleDateTestCase(TestCase):
 class RequiredFieldsTestCase(TestCase):
     """A record the destination cannot store must not take the batch down with it.
 
-    `individual_individual` declares first_name, last_name and dob NOT NULL and the
-    import is a single INSERT ... SELECT, so one null aborts the statement. Against real
-    ZISPIS data 7 records in 200 had no usable date of birth and rejected the other 193.
+    `individual_individual` declares first_name and last_name NOT NULL and the import is
+    a single INSERT ... SELECT, so one null aborts the statement. `dob` is nullable in
+    the registry and is not required by default; the tests that need a date to be
+    required opt in with `required_fields` (what a deployment whose `individual` still
+    has dob NOT NULL must do).
     """
 
     def _adapter(self, **adapter_overrides):
@@ -334,8 +338,71 @@ class RequiredFieldsTestCase(TestCase):
         })
         return BaseMappingAdapter(cfg)
 
-    def test_incomplete_record_is_held_back_and_the_rest_survive(self):
+    def _dob_required(self):
+        return self._adapter(required_fields=["first_name", "last_name", "dob"])
+
+    def test_dob_is_required_when_the_column_is_not_nullable(self):
+        """Upstream `individual` (dob NOT NULL): one record with no date would abort the
+        whole INSERT batch, so the adapter requires dob even though the config does not."""
+        with mock.patch("api_etl.adapters.base_mapping_adapter._dob_column_nullable",
+                        return_value=False):
+            adapter = self._adapter()
+        out = adapter.transform([
+            {"id": "1", "fn": "Grace", "ln": "Hopper", "d": "1906-12-09"},
+            {"id": "2", "fn": "NoDob", "ln": "Person", "d": None},
+        ])
+        self.assertEqual([r["first_name"] for r in out], ["Grace"])
+        self.assertEqual(adapter.skipped, [("2", ["dob"])])
+        # the shared config object is not mutated
+        self.assertEqual(adapter.cfg.adapter.required_fields, ["first_name", "last_name"])
+
+    def test_dob_is_not_added_when_the_column_is_nullable(self):
+        with mock.patch("api_etl.adapters.base_mapping_adapter._dob_column_nullable",
+                        return_value=True):
+            adapter = self._adapter()
+        out = adapter.transform([{"id": "2", "fn": "NoDob", "ln": "Person", "d": None}])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(adapter.skipped, [])
+
+    def test_dob_is_left_alone_when_nullability_is_unknown(self):
+        with mock.patch("api_etl.adapters.base_mapping_adapter._dob_column_nullable",
+                        return_value=None):
+            adapter = self._adapter()
+        self.assertEqual(adapter.required_fields, ["first_name", "last_name"])
+
+    def test_not_null_dob_warns_once(self):
+        base_module = "api_etl.adapters.base_mapping_adapter"
+        with mock.patch(f"{base_module}._dob_guard_warned", False), \
+                mock.patch(f"{base_module}._dob_column_nullable", return_value=False):
+            with self.assertLogs(base_module, level="WARNING") as logs:
+                self._adapter()
+                self._adapter()
+        self.assertEqual(len([m for m in logs.output if "NOT NULL" in m]), 1)
+
+    def test_dob_column_nullable_reads_the_model_field(self):
+        from individual.models import Individual
+        from api_etl.adapters.base_mapping_adapter import _dob_column_nullable
+        field = Individual._meta.get_field("dob")
+        self.assertIs(_dob_column_nullable(), field.null)
+        with mock.patch.object(field, "null", False):
+            self.assertIs(_dob_column_nullable(), False)
+        with mock.patch.object(field, "null", True):
+            self.assertIs(_dob_column_nullable(), True)
+
+    def test_dob_is_not_required_by_default(self):
+        self.assertEqual(self._adapter().cfg.adapter.required_fields,
+                         ["first_name", "last_name"])
+
+    def test_record_with_no_dob_passes_by_default(self):
         adapter = self._adapter()
+        out = adapter.transform([{"id": "1", "fn": "NoDob", "ln": "Person", "d": None}])
+        self.assertEqual(len(out), 1)
+        self.assertIsNone(out[0]["dob"])
+        self.assertEqual(adapter.skipped, [])
+        self.assertEqual(adapter.missing_required(out[0]), [])
+
+    def test_incomplete_record_is_held_back_and_the_rest_survive(self):
+        adapter = self._dob_required()
         out = adapter.transform([
             {"id": "1", "fn": "Grace", "ln": "Hopper", "d": "1906-12-09"},
             {"id": "2", "fn": "NoDob", "ln": "Person", "d": None},
@@ -347,13 +414,14 @@ class RequiredFieldsTestCase(TestCase):
     def test_a_date_rejected_as_implausible_counts_as_missing(self):
         # parse_date resolves an out-of-range year to None, which is exactly the value
         # the destination cannot store - the two rules have to agree.
-        adapter = self._adapter(min_year=1900)
+        adapter = self._adapter(min_year=1900,
+                                required_fields=["first_name", "last_name", "dob"])
         out = adapter.transform([{"id": "1", "fn": "A", "ln": "B", "d": "0002-01-01"}])
         self.assertEqual(out, [])
         self.assertEqual(adapter.skipped, [("1", ["dob"])])
 
     def test_every_missing_field_is_named(self):
-        adapter = self._adapter()
+        adapter = self._dob_required()
         adapter.transform([{"id": "1", "fn": "", "ln": None, "d": None}])
         self.assertEqual(adapter.skipped, [("1", ["first_name", "last_name", "dob"])])
 
@@ -483,3 +551,100 @@ class IncludeWhenTestCase(TestCase):
         adapter.transform(self.ROWS)
         self.assertEqual(adapter.skipped, [])
         self.assertEqual(adapter.filtered, 2)
+
+
+class TextCleaningAndQualityTestCase(TestCase):
+    """Flag, never block: values are stored as sent and problems are flagged in json_ext."""
+
+    def _row(self, **adapter_cfg):
+        cfg = {"field_map": {"first_name": "fn", "last_name": "ln"}, "external_id_field": "id"}
+        cfg.update(adapter_cfg)
+        return _adapter(**cfg)
+
+    def test_nfc_and_nfd_are_equal(self):
+        a = _adapter()
+        self.assertEqual(a.clean_text("N\u0303ongolo"), "\u00d1ongolo")
+        self.assertEqual(a.clean_text("N\u0303ongolo"), a.clean_text("\u00d1ongolo"))
+
+    def test_control_character_removed_and_flagged(self):
+        adapter = self._row()
+        record = adapter.transform_row({"id": 1, "fn": "Chanda", "ln": "NG\u00c2\x87NDU"})
+        self.assertEqual(record["last_name"], "NG\u00c2NDU")
+        self.assertEqual(record["text_quality"], "invalid_characters_removed:last_name")
+
+    def test_lone_surrogate_removed_and_flagged(self):
+        adapter = self._row()
+        record = adapter.transform_row({"id": 1, "fn": "Ban\ud800da", "ln": "Phiri"})
+        self.assertEqual(record["first_name"], "Banda")
+        self.assertEqual(record["text_quality"], "invalid_characters_removed:first_name")
+
+    def test_multiple_removed_fields_are_sorted(self):
+        record = self._row().transform_row({"id": 1, "fn": "A\x87b", "ln": "C\x87d"})
+        self.assertEqual(record["text_quality"],
+                         "invalid_characters_removed:first_name,last_name")
+
+    def test_whitespace_controls_are_not_removals(self):
+        record = self._row().transform_row({"id": 1, "fn": "\nChanda\t", "ln": "Ban\nda"})
+        self.assertEqual(record["first_name"], "Chanda")
+        self.assertNotIn("text_quality", record)
+
+    def test_unicode_names_untouched_and_unflagged(self):
+        for first, last in (("\u00d1ongolo", "Mwanz\u00e0"), ("Sa\u0155ah", "Waku\u00f1guma"),
+                            ("\u014boma", "Phiri")):
+            record = self._row().transform_row({"id": 1, "fn": first, "ln": last})
+            self.assertEqual((record["first_name"], record["last_name"]), (first, last))
+            self.assertNotIn("text_quality", record)
+            self.assertNotIn("name_quality", record)
+
+    def _quality(self, first, last, **cfg):
+        record = self._row(**cfg).transform_row({"id": 1, "fn": first, "ln": last})
+        return record.get("name_quality"), record
+
+    def test_each_name_quality_code(self):
+        self.assertEqual(self._quality("Chanda2", "Banda")[0], "contains_digits")
+        self.assertEqual(self._quality("Chanda", "123456/78/1")[0],
+                         "contains_digits;looks_like_nrc")
+        self.assertEqual(self._quality("Chanda", "Unknown")[0], "placeholder")
+        self.assertEqual(self._quality("Chanda", "-")[0],
+                         "placeholder;punctuation_only;single_character")
+        self.assertEqual(self._quality("C", "Banda")[0], "single_character")
+        self.assertEqual(self._quality("....", "Banda")[0], "punctuation_only")
+        self.assertEqual(self._quality("Precious", ".Mulenga")[0], "leading_punctuation")
+        self.assertEqual(self._quality("/JUNIOR", "Chisala")[0], "leading_punctuation")
+
+    def test_first_equal_to_last_is_not_flagged(self):
+        # Nyambe Nyambe is a common, valid Zambian name.
+        self.assertIsNone(self._quality("Nyambe", "NYAMBE")[0])
+
+    def test_non_english_letters_are_never_punctuation(self):
+        for first, last in (("\u00d1ongolo", "\u00c0mbuya"), ("\u014boma", "\u00c9lis\u00e9"),
+                            ("N'gandu", "Mwale-Banda")):
+            self.assertIsNone(self._quality(first, last)[0], (first, last))
+
+    def test_nrc_with_spaces_is_detected(self):
+        self.assertIn("looks_like_nrc", self._quality("Chanda", "123456 / 78 / 1")[0])
+
+    def test_multiple_codes_joined_sorted_and_values_unchanged(self):
+        flag, record = self._quality("X", ".x")
+        self.assertEqual(flag, "leading_punctuation;single_character")
+        self.assertEqual((record["first_name"], record["last_name"]), ("X", ".x"))
+
+    def test_clean_record_has_no_quality_keys(self):
+        record = self._row().transform_row({"id": 1, "fn": "Chanda", "ln": "Banda"})
+        self.assertNotIn("name_quality", record)
+        self.assertNotIn("text_quality", record)
+
+    def test_name_fields_configurable(self):
+        flag, _ = self._quality("Chanda2", "Banda", name_fields=["last_name"])
+        self.assertIsNone(flag)
+        flag, _ = self._quality("Chanda", "Banda9", name_fields=["last_name"])
+        self.assertEqual(flag, "contains_digits")
+        flag, _ = self._quality("Banda", "Banda", name_fields=["first_name"])
+        self.assertIsNone(flag)
+
+    def test_household_recipient_copied(self):
+        adapter = _adapter(field_map={}, external_id_field="id", group_code_field="hh",
+                           recipient_field="rcp")
+        record = adapter.transform_row({"id": 1, "hh": "H1", "rcp": "1"})
+        self.assertEqual(record["household_recipient"], record["recipient_info"])
+        self.assertEqual(record["household_recipient"], "1")

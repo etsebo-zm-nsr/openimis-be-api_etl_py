@@ -193,6 +193,87 @@ class AdapterLocationResolutionTestCase(TestCase):
         self.assertIn("location_code", header.split(","))
 
 
+class DistrictWardFallbackTestCase(TestCase):
+    """When the full path fails, district + ward alone may still resolve - but only to
+    exactly one ward, and an unresolved person is imported with NO location (name and
+    code both empty), flagged for review."""
+
+    def _adapter(self, **overrides):
+        return AdapterLocationResolutionTestCase._adapter(self, **overrides)
+
+    ROW = AdapterLocationResolutionTestCase.ROW
+
+    def setUp(self):
+        _tree()
+
+    def _second_masemu(self):
+        d = Location.objects.get(code="9.903")
+        c2 = Location(code="9.903.131", type="W", name="OTHER", parent=d); c2.save()
+        Location(code="9.903.131.1", type="V", name="MASEMU", parent=c2).save()
+
+    def test_exact_match_is_flagged_exact_without_source_location(self):
+        out = self._adapter().transform([self.ROW])[0]
+        self.assertEqual(out["location_match"], "exact")
+        self.assertNotIn("source_location", out)
+
+    def test_wrong_constituency_with_unique_ward_falls_back(self):
+        adapter = self._adapter()
+        out = adapter.transform([dict(self.ROW, con="SOMEWHERE ELSE")])[0]
+        self.assertEqual(out["location_match"], "district_ward")
+        self.assertEqual(out["location_code"], "9.903.130.9")
+        self.assertEqual(out["location_name"], "MASEMU")
+        self.assertEqual(out["source_location"], "ITEZHI-TEZHI / SOMEWHERE ELSE / MASEMU")
+        self.assertEqual(len(adapter.fallback_locations), 1)
+        self.assertEqual(adapter.unresolved_locations, [])
+
+    def test_ward_under_two_constituencies_is_unresolved(self):
+        self._second_masemu()
+        adapter = self._adapter()
+        out = adapter.transform([dict(self.ROW, con="THIRD")])[0]
+        self.assertEqual(out["location_match"], "unresolved")
+        self.assertIsNone(out["location_code"])
+        self.assertIsNone(out["location_name"])
+        self.assertEqual(len(adapter.unresolved_locations), 1)
+
+    def test_missing_ward_is_unresolved_with_no_name_and_no_code(self):
+        out = self._adapter().transform([dict(self.ROW, w="NOWHERE")])[0]
+        self.assertEqual(out["location_match"], "unresolved")
+        self.assertIsNone(out["location_code"])
+        self.assertIsNone(out["location_name"])
+        self.assertEqual(out["source_location"], "ITEZHI-TEZHI / ITEZHI-TEZHI / NOWHERE")
+
+    def test_missing_district_is_unresolved(self):
+        out = self._adapter().transform([dict(self.ROW, dist="ATLANTIS")])[0]
+        self.assertEqual(out["location_match"], "unresolved")
+        self.assertIsNone(out["location_code"])
+
+    def test_missing_level_is_shown_as_question_mark(self):
+        out = self._adapter().transform([dict(self.ROW, con=None, w="NOWHERE")])[0]
+        self.assertEqual(out["source_location"], "ITEZHI-TEZHI / ? / NOWHERE")
+
+    def test_alias_is_applied_before_the_fallback(self):
+        adapter = self._adapter(location_aliases={"ward": {"MASEMO": "MASEMU"}})
+        out = adapter.transform([dict(self.ROW, con="WRONG", w="MASEMO")])[0]
+        self.assertEqual(out["location_match"], "district_ward")
+        self.assertEqual(out["location_code"], "9.903.130.9")
+        self.assertEqual(out["source_location"], "ITEZHI-TEZHI / WRONG / MASEMO")
+
+    def test_index_skipping_middle_refuses_ambiguity(self):
+        self._second_masemu()
+        index = LocationIndex(depth=3)
+        self.assertIsNone(index.resolve_skipping_middle(["ITEZHI-TEZHI", "X", "MASEMU"]))
+        self.assertIsNotNone(index.resolve(["ITEZHI-TEZHI", "OTHER", "MASEMU"]))
+
+    def test_all_unresolved_batch_still_emits_location_code_column(self):
+        from api_etl.utils import data_to_file
+        out = self._adapter().transform([dict(self.ROW, w="NOWHERE"),
+                                         dict(self.ROW, id="2", dist="ATLANTIS")])
+        file = data_to_file(out, "batch")
+        file.file.seek(0)
+        header = file.file.read().decode("utf-8").splitlines()[0].split(",")
+        self.assertIn("location_code", header)
+
+
 class LoaderCheckTestCase(TestCase):
     """`etl_load_locations`'s internal uniqueness check, now on `place_key` rather than
     `normalise_place` - see api_etl.locations.place_key."""
