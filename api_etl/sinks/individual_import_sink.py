@@ -72,6 +72,20 @@ def _as_identifier_string(value):
     return value
 
 
+def _numeric_schema_columns():
+    """Properties `individual_schema` declares as integer or number (empty if unreadable)."""
+    try:
+        import json
+        from individual.apps import IndividualConfig
+        raw = IndividualConfig.individual_schema
+        schema = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return frozenset(
+            name for name, spec in (schema.get("properties") or {}).items()
+            if isinstance(spec, dict) and spec.get("type") in ("integer", "number"))
+    except Exception:
+        return frozenset()
+
+
 class IndividualImportSink(DataSink):
 
     def __init__(self, user: User, config=None):
@@ -267,19 +281,22 @@ class IndividualImportSink(DataSink):
             record.get("external_id"): record for record in (batch or [])
             if record.get("external_id") is not None
         }
+        numeric_columns = _numeric_schema_columns()
         try:
             from individual.models import IndividualDataSource, Individual
             rows = IndividualDataSource.objects.filter(upload_id=upload_uuid)
             individual_ids = set()
             for row in rows:
-                json_ext, changed = self._coerce_json_ext(row.json_ext, original_by_external_id)
+                json_ext, changed = self._coerce_json_ext(
+                    row.json_ext, original_by_external_id, numeric_columns)
                 if changed:
                     row.json_ext = json_ext
                     row.save(update_fields=["json_ext"])
                 if row.individual_id:
                     individual_ids.add(row.individual_id)
             for individual in Individual.objects.filter(id__in=individual_ids):
-                json_ext, changed = self._coerce_json_ext(individual.json_ext, original_by_external_id)
+                json_ext, changed = self._coerce_json_ext(
+                    individual.json_ext, original_by_external_id, numeric_columns)
                 if changed:
                     # .update(), not .save(): HistoryModel.save() bumps the row's
                     # version and requires a user - neither belongs in a background
@@ -290,7 +307,7 @@ class IndividualImportSink(DataSink):
                            upload_uuid, exc)
 
     @staticmethod
-    def _coerce_json_ext(json_ext, original_by_external_id):
+    def _coerce_json_ext(json_ext, original_by_external_id, numeric_columns=frozenset()):
         """Correct IDENTIFIER_COLUMNS in one json_ext dict. Returns (json_ext, changed)."""
         json_ext = dict(json_ext or {})
         original = original_by_external_id.get(_as_identifier_string(json_ext.get("external_id")))
@@ -309,7 +326,40 @@ class IndividualImportSink(DataSink):
             if coerced is not value and coerced != value:
                 json_ext[column] = coerced
                 changed = True
+        if original is not None:
+            changed = IndividualImportSink._restore_text_columns(
+                json_ext, original, numeric_columns) or changed
         return json_ext, changed
+
+    @staticmethod
+    def _restore_text_columns(json_ext, original, numeric_columns):
+        """Undo pandas' number inference on every other column. Returns True if changed.
+
+        The same round trip that turns a national_id into a float does it to any column
+        that happens to look numeric: a phone number "0977123456" comes back as the int
+        977123456 (leading zero gone), or as 260969282150.0 when a blank elsewhere in the
+        batch forces floats. So any value the adapter sent as text is restored from the
+        original record. A column `individual_schema` declares numeric keeps its number,
+        minus a float artefact (34.0 -> 34).
+        """
+        changed = False
+        for column, value in list(json_ext.items()):
+            if column in IDENTIFIER_COLUMNS or column not in original:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            sent = original[column]
+            if sent is None:
+                continue
+            if column in numeric_columns:
+                restored = int(value) if isinstance(value, float) and value.is_integer() \
+                    else value
+            else:
+                restored = sent
+            if restored is not value and (restored != value or type(restored) is not type(value)):
+                json_ext[column] = restored
+                changed = True
+        return changed
 
     def _tag_upload(self, result):
         """Correct IndividualDataSourceUpload.source_type after the fact.
