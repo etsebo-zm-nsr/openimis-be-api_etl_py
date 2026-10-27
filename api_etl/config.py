@@ -201,6 +201,11 @@ class AdapterConfig:
     # {level: {source spelling: gazetteer spelling}} applied before matching, for
     # spellings a source will not fix. Matched on the normalised source spelling.
     location_aliases: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # Connector-specific settings the core never reads, e.g. which Kobo repeat group
+    # holds the household roster. Without a home here, `_known` drops such keys, and a
+    # value a deployment may need to change (the roster path, how a member id is built)
+    # could only be changed in code.
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -312,6 +317,7 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "identity_key_fields": ["first_name", "last_name", "year_of_birth", "sex", "district"],
         "name_fields": ["first_name", "last_name"],
         "include_when": {}, "location_match_fields": [], "location_aliases": {},
+        "options": {},
     },
     "sink": {
         "lookup_field": "json_ext__external_id", "update_existing": True,
