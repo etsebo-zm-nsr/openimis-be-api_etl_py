@@ -141,3 +141,39 @@ class CoerceIdentifierColumnsTestCase(TestCase):
 
         row.refresh_from_db()
         self.assertEqual(row.json_ext["national_id"], "12345678")
+
+
+class RestoreTextColumnsTestCase(TestCase):
+    """Columns outside IDENTIFIER_COLUMNS go through the same pandas round trip."""
+
+    def _coerce(self, json_ext, original, numeric=frozenset()):
+        return IndividualImportSink._coerce_json_ext(
+            json_ext, {original["external_id"]: original}, numeric)
+
+    def test_phone_sent_as_text_keeps_its_leading_zero(self):
+        json_ext, changed = self._coerce(
+            {"external_id": "kobo:h:1", "phone": 977123456},
+            {"external_id": "kobo:h:1", "phone": "0977123456"})
+        self.assertTrue(changed)
+        self.assertEqual(json_ext["phone"], "0977123456")
+
+    def test_phone_forced_to_float_by_a_blank_is_restored(self):
+        json_ext, _ = self._coerce(
+            {"external_id": "kobo:h:1", "phone": 260969282150.0},
+            {"external_id": "kobo:h:1", "phone": "260969282150"})
+        self.assertEqual(json_ext["phone"], "260969282150")
+
+    def test_numeric_schema_column_keeps_a_number_without_the_float_artefact(self):
+        json_ext, _ = self._coerce(
+            {"external_id": "zispis:1", "age": 34.0},
+            {"external_id": "zispis:1", "age": 34}, numeric=frozenset({"age"}))
+        self.assertEqual(json_ext["age"], 34)
+        self.assertIsInstance(json_ext["age"], int)
+
+    def test_text_and_keys_absent_from_the_original_are_left_alone(self):
+        json_ext, changed = self._coerce(
+            {"external_id": "kobo:h:1", "sex": "male", "location_match": "exact",
+             "flag": True},
+            {"external_id": "kobo:h:1", "sex": "male", "flag": True})
+        self.assertFalse(changed)
+        self.assertEqual(json_ext["location_match"], "exact")
