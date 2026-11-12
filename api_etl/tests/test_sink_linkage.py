@@ -156,7 +156,7 @@ class SinkLinkageTestCase(TestCase):
     def test_db_match_note_takes_precedence_over_in_batch_identity_note(self):
         """Current behaviour (a DB match) must not be overwritten by the new in-batch
         check."""
-        existing = self._existing(external_id="zispis:1", identity_key="dup")
+        self._existing(external_id="zispis:1", identity_key="dup")
         self._existing(external_id="zispis:2", identity_key="dup")
         _, new = self._split([
             {"external_id": "kobo:9", "identity_key": "dup"},
