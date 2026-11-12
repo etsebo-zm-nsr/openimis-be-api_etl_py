@@ -1,0 +1,25 @@
+name: Zambia module CI
+# Runs this module's tests inside the Zambia assembly (etsebo-zm-nsr/openimis-be_py),
+# the way they run locally: `manage.py test <module> --nomigrations`, one module per run.
+# The reusable workflow is upstream's ci_module.yml, configured through its inputs.
+on:
+  push:
+    branches:
+      - 'zm/**'
+  pull_request:
+    branches:
+      - 'zm/**'
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  call:
+    name: Module tests
+    uses: etsebo-zm-nsr/openimis-be_py/.github/workflows/ci_module.yml@zm/develop
+    with:
+      be_repository: etsebo-zm-nsr/openimis-be_py
+      # PRs test against the branch they merge into; pushes against zm/develop.
+      be_branch: ${{ github.base_ref || 'zm/develop' }}
+      test_args: '--nomigrations --noinput'
+      test_db_name: test_zm_module
+      run_all_tests: false
