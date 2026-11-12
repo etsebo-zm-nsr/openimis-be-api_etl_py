@@ -37,7 +37,10 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('core', '__first__'),
+        # Role and RoleRight are created by core.0008, and RoleRight.validity_from only gets
+        # its default in core.0020. A shallower dependency lets the migration run first on a
+        # fresh database (LookupError: App 'core' doesn't have a 'role' model).
+        ('core', '0020_add_missing_fields_to_django_scheme'),
     ]
 
     operations = [
