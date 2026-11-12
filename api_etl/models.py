@@ -143,3 +143,37 @@ class ETLSyncState(models.Model):
             state.run_finished = None
             state.save()
         return state
+
+
+class ETLHeldRecord(models.Model):
+    """A source record the adapter could not import, kept so it can be found and fixed.
+
+    A record is held back only when openIMIS physically cannot store it (a required value
+    such as the date of birth or a name is absent). Before this table those records were
+    only logged and counted, so after the run nobody could say WHO was missing or why.
+
+    One row per (source, external_id), upserted on every sighting: `times_seen` and
+    `last_seen` show whether the problem persists, and `resolved_at` is set when a later
+    run imports the person (and cleared if they are held again). Operational state, so a
+    plain `models.Model` like `ETLSyncState`.
+    """
+    source_name = models.CharField(max_length=64, db_index=True)
+    external_id = models.CharField(max_length=255)
+
+    # Names of the required fields that were missing, e.g. ["date_of_birth"].
+    reasons = models.JSONField(default=list)
+    # The source row as received (sanitised so PostgreSQL JSONB accepts it).
+    raw_payload = models.JSONField(default=dict)
+
+    first_seen = models.DateTimeField()
+    last_seen = models.DateTimeField()
+    times_seen = models.IntegerField(default=1)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "api_etl_held_record"
+        unique_together = (("source_name", "external_id"),)
+
+    def __str__(self):
+        state = "resolved" if self.resolved_at else "open"
+        return f"{self.source_name}/{self.external_id}: {','.join(self.reasons)} ({state})"

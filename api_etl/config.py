@@ -154,12 +154,16 @@ class AdapterConfig:
     # them; otherwise the pre-flight passes and the import fails.
     extra_columns: List[str] = field(default_factory=list)
     # Columns the DESTINATION cannot store as null. `individual_individual` declares
-    # first_name, last_name and dob NOT NULL, and the import runs as a single INSERT
+    # first_name and last_name NOT NULL, and the import runs as a single INSERT
     # ... SELECT: one row missing a value aborts the statement, so a handful of
     # incomplete records reject every good record alongside them. Rows missing any of
     # these are held back and counted instead.
+    # `dob` is deliberately absent: it is nullable in the registry, which stores "unknown"
+    # as unknown rather than generate a date. A deployment whose `individual` still has
+    # dob NOT NULL does not need to add it back here: BaseMappingAdapter detects the
+    # NOT NULL column and requires `dob` for that adapter (with a one-time warning).
     required_fields: List[str] = field(
-        default_factory=lambda: ["first_name", "last_name", "dob"])
+        default_factory=lambda: ["first_name", "last_name"])
     # THE single definition of "same person" for this source. Listed as OUTPUT column
     # names, so it is readable and changeable in one place - here in DEFAULT_CONFIG, or
     # overridden per deployment in ModuleConfiguration - rather than compiled into the
@@ -181,6 +185,9 @@ class AdapterConfig:
     # row. Configurable because a source's own filters may be unusable - ZISPIS accepts
     # unknown filter keys and silently ignores them, so filtering has to happen here.
     include_when: Dict[str, List[Any]] = field(default_factory=dict)
+    # Output columns checked for name-quality problems (digits, NRC-like text,
+    # placeholders, ...). Problems are flagged in `name_quality`; values are not changed.
+    name_fields: List[str] = field(default_factory=lambda: ["first_name", "last_name"])
     # Output columns holding the place names to resolve against the loaded location
     # tree, outermost first - e.g. ["district", "constituency", "ward"]. Empty disables
     # resolution and leaves whatever `field_map` produced.
@@ -301,8 +308,9 @@ SOURCE_DEFAULTS: Dict[str, Any] = {
         "default_role": "OTHER_RELATIVE", "recipient_field": None,
         "national_id_field": None, "national_id_type_field": None, "date_formats": ["%Y-%m-%d"],
         "clean_whitespace": True, "min_year": 1900, "max_year": 0,
-        "extra_columns": [], "required_fields": ["first_name", "last_name", "dob"],
+        "extra_columns": [], "required_fields": ["first_name", "last_name"],
         "identity_key_fields": ["first_name", "last_name", "year_of_birth", "sex", "district"],
+        "name_fields": ["first_name", "last_name"],
         "include_when": {}, "location_match_fields": [], "location_aliases": {},
     },
     "sink": {

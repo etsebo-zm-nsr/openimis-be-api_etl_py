@@ -3,7 +3,7 @@ from unittest.mock import patch
 from api_etl.sinks.individual_import_sink import IndividualImportSink, IMPORT_NEW_INDIVIDUALS, UPDATE_EXISTING_INDIVIDUALS, WORKFLOW_GROUP
 from core.models import Language
 from core.test_helpers import LogInHelper
-from individual.models import Individual
+from individual.models import Individual, IndividualDataSourceUpload
 from django.core.files.uploadedfile import InMemoryUploadedFile
 from api_etl.apps import ApiEtlConfig
 
@@ -132,6 +132,103 @@ class TestIndividualImportSink(TestCase):
         content = import_file.file.read().decode('utf-8')
         expected_csv = 'external_id,name,age\r\n456,Jane Smith,25\r\n'
         self.assertEqual(content, expected_csv)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_reports_overall_success(self, mock_get_workflows, mock_import_individuals):
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        new = {'external_id': 456, 'name': 'Jane'}
+        mock_import_individuals.return_value = {'success': True}
+        self.assertIs(sink.push([dict(new)]), True)
+        mock_import_individuals.return_value = {'success': False}
+        self.assertIs(sink.push([dict(new, external_id=457)]), False)
+
+    def _upload(self, status):
+        upload = IndividualDataSourceUpload(source_name='t', source_type='individual import',
+                                            status=status)
+        upload.save(username=self.user.login_name)
+        return upload
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_fails_when_the_upload_ended_in_fail(self, mock_get_workflows,
+                                                      mock_import_individuals):
+        """import_individuals reports success even when the workflow failed - it records
+        FAIL on the upload row instead. push must read that back."""
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        upload = self._upload(IndividualDataSourceUpload.Status.FAIL)
+        mock_import_individuals.return_value = {
+            'success': True, 'data': {'upload_uuid': upload.uuid}}
+        self.assertIs(sink.push([{'external_id': 456, 'name': 'Jane'}]), False)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_fails_when_only_the_update_upload_failed(self, mock_get_workflows,
+                                                           mock_import_individuals):
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        good = self._upload(IndividualDataSourceUpload.Status.SUCCESS)
+        bad = self._upload(IndividualDataSourceUpload.Status.FAIL)
+        mock_import_individuals.side_effect = [
+            {'success': True, 'data': {'upload_uuid': good.uuid}},
+            {'success': True, 'data': {'upload_uuid': bad.uuid}},
+        ]
+        data = [{'external_id': 123, 'name': 'John'}, {'external_id': 456, 'name': 'Jane'}]
+        self.assertIs(sink.push(data), False)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_push_succeeds_for_accepted_upload_statuses(self, mock_get_workflows,
+                                                        mock_import_individuals):
+        """SUCCESS, PARTIAL_SUCCESS (some rows flagged invalid) and WAITING_FOR_VERIFICATION
+        (maker-checker) are accepted batches; a missing upload uuid keeps the reported
+        success."""
+        mock_get_workflows.side_effect = mock_get_workflow
+        sink = IndividualImportSink(self.user)
+        statuses = IndividualDataSourceUpload.Status
+        for i, status in enumerate((statuses.SUCCESS, statuses.PARTIAL_SUCCESS,
+                                    statuses.WAITING_FOR_VERIFICATION)):
+            upload = self._upload(status)
+            mock_import_individuals.return_value = {
+                'success': True, 'data': {'upload_uuid': upload.uuid}}
+            self.assertIs(sink.push([{'external_id': 500 + i, 'name': 'X'}]), True, status)
+        mock_import_individuals.return_value = {'success': True, 'data': {}}
+        self.assertIs(sink.push([{'external_id': 600, 'name': 'X'}]), True)
+
+    @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
+    @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
+    def test_unresolved_existing_keeps_current_location(self, mock_get_workflows,
+                                                       mock_import_individuals):
+        from location.models import Location
+        mock_get_workflows.side_effect = mock_get_workflow
+        mock_import_individuals.return_value = {'success': True}
+        village = Location(code='V001', name='Kafue', type='V', validity_from='2020-01-01')
+        village.save()
+        self.individual.location = village
+        self.individual.save(user=self.user)
+        no_loc = Individual(first_name='No', last_name='Loc', dob='1990-01-01',
+                            json_ext={'external_id': 789})
+        no_loc.save(user=self.user)
+
+        def unresolved(external_id):
+            return {'external_id': external_id, 'location_match': 'unresolved',
+                    'source_location': 'A / B / C', 'location_code': None,
+                    'location_name': None}
+
+        records = [unresolved(123), unresolved(789), unresolved(999)]
+        IndividualImportSink(self.user).push(records)
+
+        by_id = {r['external_id']: r for r in records}
+        self.assertEqual(by_id[123]['location_code'], 'V001')
+        self.assertEqual(by_id[123]['location_name'], 'Kafue')
+        self.assertEqual(by_id[123]['location_match'], 'unresolved_kept_existing')
+        self.assertEqual(by_id[123]['source_location'], 'A / B / C')
+        self.assertIsNone(by_id[789]['location_code'])
+        self.assertEqual(by_id[789]['location_match'], 'unresolved')
+        self.assertIsNone(by_id[999]['location_code'])
+        self.assertEqual(by_id[999]['location_match'], 'unresolved')
 
 
 def mock_get_workflow(name, group):

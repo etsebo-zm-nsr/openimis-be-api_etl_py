@@ -30,7 +30,7 @@ from collections import defaultdict
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from api_etl.locations import normalise_place
+from api_etl.locations import normalise_place, place_key
 
 DEFAULT_LEVELS = "R:province_code:province,D:district_code:district," \
                  "W:constituency_code:constituency,V:ward_code:ward"
@@ -103,17 +103,27 @@ class Command(BaseCommand):
     def _check(self, rows, levels):
         """Uniqueness is only required WITHIN a parent - that is how gazetteer codes are
         scoped. Report both directions: one code with two names, and one name with two
-        codes. The second is what breaks name-based resolution."""
+        codes. The second is what breaks name-based resolution.
+
+        Grouped on `place_key` rather than `normalise_place` - resolution is now
+        space-insensitive (see api_etl.locations.place_key), so this has to catch a name
+        clash that only exists once spaces are ignored too, e.g. two DIFFERENT wards
+        under one parent named "MWICHE" and "MWICH E". `display` keeps a readable,
+        space-preserving form of each name for the report - `place_key` itself is not
+        meant to be read.
+        """
         total = 0
         for depth, (_, code_col, name_col) in enumerate(levels):
             parents = [levels[i][1] for i in range(depth)]
             by_code, by_name = defaultdict(set), defaultdict(set)
+            display = {}
             for row in rows:
                 key = tuple((row.get(p) or "").strip() for p in parents)
-                by_code[key + ((row.get(code_col) or "").strip(),)].add(
-                    normalise_place(row.get(name_col)))
-                by_name[key + (normalise_place(row.get(name_col)),)].add(
-                    (row.get(code_col) or "").strip())
+                code = (row.get(code_col) or "").strip()
+                name_key = place_key(row.get(name_col))
+                display.setdefault(name_key, normalise_place(row.get(name_col)))
+                by_code[key + (code,)].add(name_key)
+                by_name[key + (name_key,)].add(code)
             code_clash = {k: v for k, v in by_code.items() if len(v) > 1}
             name_clash = {k: v for k, v in by_name.items() if len(v) > 1}
             total += len(code_clash) + len(name_clash)
@@ -124,10 +134,10 @@ class Command(BaseCommand):
                     f"{len(name_clash)} name(s) with several codes"))
                 for k, v in list(code_clash.items())[:5]:
                     self.stdout.write(f"      code {k[-1]!r} under {'/'.join(k[:-1]) or 'top'}"
-                                      f" -> {sorted(x for x in v if x)}")
+                                      f" -> {sorted(display[x] for x in v if x)}")
                 for k, v in list(name_clash.items())[:5]:
-                    self.stdout.write(f"      name {k[-1]!r} under {'/'.join(k[:-1]) or 'top'}"
-                                      f" -> codes {sorted(v)}")
+                    self.stdout.write(f"      name {display.get(k[-1], k[-1])!r} under "
+                                      f"{'/'.join(k[:-1]) or 'top'} -> codes {sorted(v)}")
             else:
                 self.stdout.write(self.style.SUCCESS(f"  {label}: clean"))
         return total

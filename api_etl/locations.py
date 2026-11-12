@@ -35,6 +35,21 @@ def normalise_place(value) -> Optional[str]:
     return " ".join(re.sub(r"[^A-Z0-9]+", " ", text).split()) or None
 
 
+def place_key(value) -> Optional[str]:
+    """`normalise_place`, with the spaces removed too - for MATCHING only, never display.
+
+    Every non-alphanumeric character folds to a space, so where an apostrophe (or a
+    hyphen, or any other punctuation) LANDS still matters: ZISPIS's `SHIWANGA'NDU`
+    normalises to "SHIWANGA NDU", the GEO file's own `SHIWANGANDU` to itself - never the
+    same string, even though they name the same place (measured: 1,356 records
+    unresolved for this reason alone - `MNGO'MBA` vs `MNG OMBA`, `CHING'OMBE` vs
+    `CHINGOMBE`, `NG'UNYAMA` vs `NGUNYAMA`). Stripping spaces after normalising makes the
+    comparison immune to where the punctuation fell.
+    """
+    key = normalise_place(value)
+    return key.replace(" ", "") if key is not None else None
+
+
 class LocationIndex:
     """Lookup from a tuple of place names to a loaded location's code.
 
@@ -47,6 +62,10 @@ class LocationIndex:
         self.leaf_type = leaf_type
         self.depth = depth
         self._index: Optional[Dict[Tuple, Tuple[str, str]]] = None
+        # (first-level key, last-level key) -> every distinct leaf under that pair, for
+        # the district+ward fallback. Unlike `_index` it keeps clashes, so a pair that
+        # reaches more than one leaf can be recognised as ambiguous.
+        self._ends: Dict[Tuple, Dict[str, Tuple[str, str]]] = {}
         self.ambiguous: Dict[Tuple, int] = {}
 
     def _build(self) -> Dict[Tuple, Tuple[str, str]]:
@@ -56,14 +75,16 @@ class LocationIndex:
                 .select_related("parent", "parent__parent", "parent__parent__parent"))
         index: Dict[Tuple, Tuple[str, str]] = {}
         clashes: Dict[Tuple, int] = {}
+        ends: Dict[Tuple, Dict[str, Tuple[str, str]]] = {}
         for leaf in rows:
             chain, node = [], leaf
             while node is not None and len(chain) < self.depth:
-                chain.append(normalise_place(node.name))
+                chain.append(place_key(node.name))
                 node = node.parent
             if len(chain) < self.depth or any(part is None for part in chain):
                 continue
             key = tuple(reversed(chain))
+            ends.setdefault((key[0], key[-1]), {})[leaf.code] = (leaf.code, leaf.name)
             if key in index and index[key][0] != leaf.code:
                 # The gazetteer itself is ambiguous here. Refuse to guess: drop the
                 # entry so callers get "unresolved" rather than an arbitrary winner.
@@ -73,6 +94,7 @@ class LocationIndex:
             if key not in clashes:
                 index[key] = (leaf.code, leaf.name)
         self.ambiguous = clashes
+        self._ends = ends
         if clashes:
             logger.warning(
                 "api_etl: %s location name path(s) are ambiguous in the loaded tree and "
@@ -89,10 +111,29 @@ class LocationIndex:
 
     def resolve(self, names: Sequence) -> Optional[Tuple[str, str]]:
         """(code, canonical_name) for this name path, or None."""
-        key = tuple(normalise_place(part) for part in names)
+        key = tuple(place_key(part) for part in names)
         if any(part is None for part in key):
             return None
         return self.index.get(key)
+
+    def resolve_skipping_middle(self, names: Sequence) -> Optional[Tuple[str, str]]:
+        """(code, canonical_name) matching only the FIRST and LAST name, or None.
+
+        For a source whose middle level (constituency) disagrees with the gazetteer. It
+        resolves only when exactly ONE lowest-level location carries that ward name
+        within that district; a ward name reachable through two constituencies (or
+        absent) is None, never a guess.
+        """
+        if len(names) < 2:
+            return None
+        first, last = place_key(names[0]), place_key(names[-1])
+        if first is None or last is None:
+            return None
+        _ = self.index  # ensure built
+        candidates = self._ends.get((first, last), {})
+        if len(candidates) != 1:
+            return None
+        return next(iter(candidates.values()))
 
     def __len__(self) -> int:
         return len(self.index)
@@ -110,7 +151,7 @@ def apply_aliases(names: Sequence, aliases: Optional[Dict[str, Dict[str, str]]],
     out = []
     for level, value in zip(levels, names):
         table = aliases.get(level) or {}
-        lookup = {normalise_place(k): v for k, v in table.items()}
-        replacement = lookup.get(normalise_place(value))
+        lookup = {place_key(k): v for k, v in table.items()}
+        replacement = lookup.get(place_key(value))
         out.append(replacement if replacement is not None else value)
     return out

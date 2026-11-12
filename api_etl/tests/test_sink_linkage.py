@@ -124,3 +124,52 @@ class SinkLinkageTestCase(TestCase):
         self._existing(external_id="zispis:1", national_id="111111111")
         _, new = self._split([{"external_id": "kobo:9", "national_id": "999999999"}])
         self.assertNotIn("linkage_note", new[0])
+
+    # ----------------------------------------------------- same-batch duplicates
+
+    def test_same_batch_identity_key_pair_is_flagged_both_ways(self):
+        """Neither record exists in the DB yet - both are new to the registry in the
+        SAME push, so _link_by_identity_key (which only queries the DB) never compares
+        them to each other."""
+        _, new = self._split([
+            {"external_id": "zispis:1", "identity_key": "shared"},
+            {"external_id": "zispis:2", "identity_key": "shared"},
+        ])
+        self.assertEqual(len(new), 2)
+        for record in new:
+            self.assertNotIn("ID", record)
+            self.assertIn("shared with 1 other record(s) in this batch", record["linkage_note"])
+        self.assertIn("zispis:2", new[0]["linkage_note"])
+        self.assertIn("zispis:1", new[1]["linkage_note"])
+
+    def test_same_batch_national_id_pair_is_flagged_both_ways(self):
+        _, new = self._split([
+            {"external_id": "zispis:1", "national_id": "123456781"},
+            {"external_id": "zispis:2", "national_id": "123456781"},
+        ])
+        self.assertEqual(len(new), 2)
+        for record in new:
+            self.assertNotIn("ID", record)
+            self.assertIn("shared with 1 other record(s) in this batch", record["linkage_note"])
+            self.assertIn("NOT merged", record["linkage_note"])
+
+    def test_db_match_note_takes_precedence_over_in_batch_identity_note(self):
+        """Current behaviour (a DB match) must not be overwritten by the new in-batch
+        check."""
+        existing = self._existing(external_id="zispis:1", identity_key="dup")
+        self._existing(external_id="zispis:2", identity_key="dup")
+        _, new = self._split([
+            {"external_id": "kobo:9", "identity_key": "dup"},
+            {"external_id": "kobo:10", "identity_key": "dup"},
+        ])
+        for record in new:
+            self.assertIn("matches 2 existing", record["linkage_note"])
+            self.assertNotIn("in this batch", record["linkage_note"])
+
+    def test_in_batch_identity_note_takes_precedence_over_in_batch_national_id_note(self):
+        _, new = self._split([
+            {"external_id": "zispis:1", "identity_key": "shared", "national_id": "123456781"},
+            {"external_id": "zispis:2", "identity_key": "shared", "national_id": "123456781"},
+        ])
+        for record in new:
+            self.assertIn("identity key shared", record["linkage_note"])
