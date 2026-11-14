@@ -18,8 +18,9 @@ jobs:
     uses: etsebo-zm-nsr/openimis-be_py/.github/workflows/ci_module.yml@zm/develop
     with:
       be_repository: etsebo-zm-nsr/openimis-be_py
-      # PRs test against the branch they merge into; pushes against zm/develop.
-      be_branch: ${{ github.base_ref || 'zm/develop' }}
+      # The assembly branch named like the branch under test, else the PR base,
+      # else zm/develop.
+      be_fallback_branch: zm/develop
       test_args: '--nomigrations --noinput'
       test_db_name: test_zm_module
       run_all_tests: false
