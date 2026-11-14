@@ -17,6 +17,11 @@ It validates the schema of THIS deployment, which is loaded into `IndividualConf
 startup. When the shared ETL columns are absent the test skips rather than failing, so
 "this database is not set up" reports as a skip and "this deployment's connector config
 and schema disagree" as a failure - two very different problems.
+
+The same holds per connector. Connector columns are declared through the admin, never by
+a migration, so a fresh database (CI) has none of them. A connector with NONE of its own
+columns declared has not been configured here and is skipped by name; one with SOME of
+them declared has drifted and fails.
 """
 import json
 
@@ -45,6 +50,23 @@ def _declared_columns():
 def _base_fields():
     from individual.apps import IndividualConfig
     return set(IndividualConfig.individual_base_fields or [])
+
+
+def _default_columns():
+    """Columns the individual module accepts before any deployment configuration."""
+    from individual.apps import DEFAULT_CONFIG
+    raw = DEFAULT_CONFIG.get("individual_schema") or "{}"
+    schema = json.loads(raw) if isinstance(raw, str) else raw
+    return (set((schema or {}).get("properties", {}))
+            | set(DEFAULT_CONFIG.get("individual_base_fields") or []))
+
+
+def _own_columns(config):
+    """Columns only this connector's configuration introduces: not shared, not default."""
+    adapter = config.adapter
+    return ((set(adapter.field_map or {}) | set(adapter.constants or {})
+             | set(adapter.extra_columns or ()))
+            - CORE_EMITTED - MAGIC_COLUMNS - _default_columns())
 
 
 def _emitted_columns(config):
@@ -90,11 +112,16 @@ class ConnectorSchemaContractTestCase(TestCase):
         self.assertTrue(registrations, "no ETL connectors registered")
 
         problems = []
+        not_configured = []
         for registration in registrations:
             try:
                 config = registration.build_config()
             except Exception as exc:                      # noqa: BLE001 - reported, not raised
                 problems.append(f"{registration.name}: config failed to build - {exc}")
+                continue
+            own = _own_columns(config)
+            if own and not own & self.declared:
+                not_configured.append(registration.name)
                 continue
             undeclared = sorted(_emitted_columns(config) - self.allowed)
             if undeclared:
@@ -105,6 +132,12 @@ class ConnectorSchemaContractTestCase(TestCase):
                 )
 
         self.assertEqual(problems, [], "\n" + "\n".join(problems))
+        if not_configured:
+            self.skipTest(
+                f"no columns declared for {', '.join(not_configured)} in this database's "
+                "individual_schema, so those connectors are not configured here "
+                "(declare them through the admin, then run manage.py etl_check_schema)."
+            )
 
     def test_no_connector_emits_a_reserved_magic_column_via_field_map(self):
         """group_code/individual_role/recipient_info are set by the adapter itself.

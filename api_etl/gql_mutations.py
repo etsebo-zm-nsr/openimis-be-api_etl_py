@@ -7,7 +7,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError
 
 from api_etl.apps import ApiEtlConfig
-from api_etl.dispatch import build_service, resolve_service
+from api_etl.dispatch import resolve_service
 from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
 

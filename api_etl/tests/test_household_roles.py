@@ -230,7 +230,6 @@ class FlagHouseholdHeadStatusTestCase(TestCase):
         self.assertEqual(summary["no_source"], 1)
         self.assertEqual(Group.objects.get(pk=self.group.pk).json_ext, {"keep": "me"})
 
-
     # household_recipient read back from the CSV as 1.0 is still 'declared'.
     def test_float_and_string_markers_are_declared_other_is_not(self):
         for recipient, expected in ((1.0, "declared"), ("1.0", "declared"), (1, "declared"),
