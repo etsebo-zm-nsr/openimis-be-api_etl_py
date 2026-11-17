@@ -36,7 +36,7 @@ def run_etl_source_sync(source_name, user_id=None):
     user = _resolve_user(user_id)
     if user is None:
         return {"success": False, "message": "No user available to run the ETL",
-                "detail": f"Configure api_etl system_user_login or pass a user id",
+                "detail": "Configure api_etl system_user_login or pass a user id",
                 "data": None}
 
     service = build_service(source_name, user)

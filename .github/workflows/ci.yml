@@ -17,6 +17,9 @@ on:
 jobs:
   call:
     name: Default CI Flow
+    # Forks that test the module elsewhere set the repository variable
+    # SKIP_DEFAULT_MODULE_CI=true to switch this flow off.
+    if: vars.SKIP_DEFAULT_MODULE_CI != 'true'
     uses: openimis/openimis-be_py/.github/workflows/ci_module.yml@develop
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

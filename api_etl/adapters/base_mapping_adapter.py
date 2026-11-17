@@ -241,7 +241,8 @@ class BaseMappingAdapter(DataAdapter):
             logger.debug("api_etl[%s]: implausible date %r - storing nothing",
                          self.cfg.name, value)
             return None
-        return parsed.strftime("%Y-%m-%d")
+        # Not strftime("%Y"): glibc does not zero-pad years below 1000 (0002 -> "2").
+        return parsed.date().isoformat()
 
     def map_role(self, raw_role: Any) -> str:
         """Map a source role value to a GroupIndividual.Role attribute NAME."""

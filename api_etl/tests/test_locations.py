@@ -15,10 +15,14 @@ from location.models import Location
 
 def _tree():
     """SOUTHERN > ITEZHI-TEZHI > ITEZHI-TEZHI > MASEMU, codes as a dotted path."""
-    r = Location(code="9", type="R", name="SOUTHERN"); r.save()
-    d = Location(code="9.903", type="D", name="ITEZHI-TEZHI", parent=r); d.save()
-    c = Location(code="9.903.130", type="W", name="ITEZHI-TEZHI", parent=d); c.save()
-    v = Location(code="9.903.130.9", type="V", name="MASEMU", parent=c); v.save()
+    r = Location(code="9", type="R", name="SOUTHERN")
+    r.save()
+    d = Location(code="9.903", type="D", name="ITEZHI-TEZHI", parent=r)
+    d.save()
+    c = Location(code="9.903.130", type="W", name="ITEZHI-TEZHI", parent=d)
+    c.save()
+    v = Location(code="9.903.130.9", type="V", name="MASEMU", parent=c)
+    v.save()
     return v
 
 
@@ -79,10 +83,14 @@ class LocationIndexTestCase(TestCase):
     def test_resolution_is_space_insensitive(self):
         """The property place_key exists for: an apostrophe folded to a space on one
         side and dropped on the other must still resolve to the same node."""
-        r = Location(code="10", type="R", name="MUCHINGA"); r.save()
-        d = Location(code="10.1", type="D", name="SHIWANGANDU", parent=r); d.save()
-        c = Location(code="10.1.1", type="W", name="MPIKA", parent=d); c.save()
-        v = Location(code="10.1.1.1", type="V", name="MNGOMBA", parent=c); v.save()
+        r = Location(code="10", type="R", name="MUCHINGA")
+        r.save()
+        d = Location(code="10.1", type="D", name="SHIWANGANDU", parent=r)
+        d.save()
+        c = Location(code="10.1.1", type="W", name="MPIKA", parent=d)
+        c.save()
+        v = Location(code="10.1.1.1", type="V", name="MNGOMBA", parent=c)
+        v.save()
         index = LocationIndex(depth=3)
         self.assertEqual(index.resolve(["SHIWANGA'NDU", "MPIKA", "MNGO'MBA"]),
                          ("10.1.1.1", "MNGOMBA"))
@@ -100,7 +108,8 @@ class LocationIndexTestCase(TestCase):
         which no downstream check would catch.
         """
         c2 = Location.objects.get(code="9.903.130")
-        dup = Location(code="9.903.130.77", type="V", name="MASEMU", parent=c2); dup.save()
+        dup = Location(code="9.903.130.77", type="V", name="MASEMU", parent=c2)
+        dup.save()
         index = LocationIndex(depth=3)
         self.assertIsNone(index.resolve(["ITEZHI-TEZHI", "ITEZHI-TEZHI", "MASEMU"]))
         self.assertEqual(len(index.ambiguous), 1)
@@ -208,7 +217,8 @@ class DistrictWardFallbackTestCase(TestCase):
 
     def _second_masemu(self):
         d = Location.objects.get(code="9.903")
-        c2 = Location(code="9.903.131", type="W", name="OTHER", parent=d); c2.save()
+        c2 = Location(code="9.903.131", type="W", name="OTHER", parent=d)
+        c2.save()
         Location(code="9.903.131.1", type="V", name="MASEMU", parent=c2).save()
 
     def test_exact_match_is_flagged_exact_without_source_location(self):

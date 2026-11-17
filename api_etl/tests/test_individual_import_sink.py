@@ -200,7 +200,7 @@ class TestIndividualImportSink(TestCase):
     @patch('api_etl.sinks.individual_import_sink.IndividualImportService.import_individuals')
     @patch('api_etl.sinks.individual_import_sink.WorkflowService.get_workflows')
     def test_unresolved_existing_keeps_current_location(self, mock_get_workflows,
-                                                       mock_import_individuals):
+                                                        mock_import_individuals):
         from location.models import Location
         mock_get_workflows.side_effect = mock_get_workflow
         mock_import_individuals.return_value = {'success': True}
